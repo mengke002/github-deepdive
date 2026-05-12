@@ -20,28 +20,14 @@ jobs:
   daily-tasks:
     runs-on: ubuntu-latest
     env:
-      # Database Source
-      TIDB_SOURCE_HOST: ${{ secrets.TIDB_SOURCE_HOST }}
-      TIDB_SOURCE_PORT: ${{ secrets.TIDB_SOURCE_PORT }}
-      TIDB_SOURCE_USER: ${{ secrets.TIDB_SOURCE_USER }}
-      TIDB_SOURCE_PASSWORD: ${{ secrets.TIDB_SOURCE_PASSWORD }}
-      TIDB_SOURCE_DB: ${{ secrets.TIDB_SOURCE_DB || 'gh_source_db' }}
+      # Database Connections
+      TIDB_SOURCE_URL: ${{ secrets.TIDB_SOURCE_URL }}
+      TIDB_RELATION_URL: ${{ secrets.TIDB_RELATION_URL }}
+      TIDB_INSIGHT_URL: ${{ secrets.TIDB_INSIGHT_URL }}
+      
+      # SSL Mode (optional override)
       TIDB_SOURCE_SSL: ${{ secrets.TIDB_SOURCE_SSL || 'REQUIRED' }}
-      
-      # Database Relation
-      TIDB_RELATION_HOST: ${{ secrets.TIDB_RELATION_HOST }}
-      TIDB_RELATION_PORT: ${{ secrets.TIDB_RELATION_PORT }}
-      TIDB_RELATION_USER: ${{ secrets.TIDB_RELATION_USER }}
-      TIDB_RELATION_PASSWORD: ${{ secrets.TIDB_RELATION_PASSWORD }}
-      TIDB_RELATION_DB: ${{ secrets.TIDB_RELATION_DB || 'gh_relation_db' }}
       TIDB_RELATION_SSL: ${{ secrets.TIDB_RELATION_SSL || 'REQUIRED' }}
-      
-      # Database Insight
-      TIDB_INSIGHT_HOST: ${{ secrets.TIDB_INSIGHT_HOST }}
-      TIDB_INSIGHT_PORT: ${{ secrets.TIDB_INSIGHT_PORT }}
-      TIDB_INSIGHT_USER: ${{ secrets.TIDB_INSIGHT_USER }}
-      TIDB_INSIGHT_PASSWORD: ${{ secrets.TIDB_INSIGHT_PASSWORD }}
-      TIDB_INSIGHT_DB: ${{ secrets.TIDB_INSIGHT_DB || 'gh_insight_db' }}
       TIDB_INSIGHT_SSL: ${{ secrets.TIDB_INSIGHT_SSL || 'REQUIRED' }}
       
       # GitHub API

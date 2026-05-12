@@ -1,6 +1,22 @@
 import os
 import configparser
+from urllib.parse import urlparse
 from dotenv import load_dotenv
+
+def parse_db_url(url):
+    """Parse a MySQL URL into components."""
+    if not url:
+        return {}
+    parsed = urlparse(url)
+    # mysql://user:password@host:port/db_name
+    db_name = parsed.path.lstrip('/')
+    return {
+        "host": parsed.hostname,
+        "port": parsed.port or 3306,
+        "user": parsed.username,
+        "password": parsed.password,
+        "db_name": db_name
+    }
 
 def load_config(config_path="config.ini"):
     """
@@ -54,35 +70,44 @@ def load_config(config_path="config.ini"):
         except (TypeError, ValueError):
             return default
 
+    # Database URLs
+    source_url = get_setting("database_source", "url", "TIDB_SOURCE_URL")
+    relation_url = get_setting("database_relation", "url", "TIDB_RELATION_URL")
+    insight_url = get_setting("database_insight", "url", "TIDB_INSIGHT_URL")
+
+    source_url_parts = parse_db_url(source_url)
+    relation_url_parts = parse_db_url(relation_url)
+    insight_url_parts = parse_db_url(insight_url)
+
     # 构造并返回配置字典 (模拟 rss-info-collector 的最佳实践)
     settings = {
         "database": {
             "source": {
-                "host": get_setting("database_source", "host", "TIDB_SOURCE_HOST", "127.0.0.1"),
-                "port": to_int(get_setting("database_source", "port", "TIDB_SOURCE_PORT", 4000), 4000),
-                "user": get_setting("database_source", "user", "TIDB_SOURCE_USER", "root"),
-                "password": get_setting("database_source", "password", "TIDB_SOURCE_PASSWORD", ""),
-                "db_name": get_setting("database_source", "db_name", "TIDB_SOURCE_DB", "gh_source_db"),
+                "host": source_url_parts.get("host") or get_setting("database_source", "host", "TIDB_SOURCE_HOST", "127.0.0.1"),
+                "port": to_int(source_url_parts.get("port") or get_setting("database_source", "port", "TIDB_SOURCE_PORT", 4000), 4000),
+                "user": source_url_parts.get("user") or get_setting("database_source", "user", "TIDB_SOURCE_USER", "root"),
+                "password": source_url_parts.get("password") or get_setting("database_source", "password", "TIDB_SOURCE_PASSWORD", ""),
+                "db_name": source_url_parts.get("db_name") or get_setting("database_source", "db_name", "TIDB_SOURCE_DB", "gh_source_db"),
                 "ssl_mode": get_setting("database_source", "ssl_mode", "TIDB_SOURCE_SSL", "REQUIRED"),
                 "ssl_ca": get_setting("database_source", "ssl_ca", "TIDB_SSL_CA", ""),
                 "connect_timeout": to_int(get_setting("database_source", "connect_timeout", "TIDB_SOURCE_CONNECT_TIMEOUT", 5), 5),
             },
             "relation": {
-                "host": get_setting("database_relation", "host", "TIDB_RELATION_HOST", "127.0.0.1"),
-                "port": to_int(get_setting("database_relation", "port", "TIDB_RELATION_PORT", 4000), 4000),
-                "user": get_setting("database_relation", "user", "TIDB_RELATION_USER", "root"),
-                "password": get_setting("database_relation", "password", "TIDB_RELATION_PASSWORD", ""),
-                "db_name": get_setting("database_relation", "db_name", "TIDB_RELATION_DB", "gh_relation_db"),
+                "host": relation_url_parts.get("host") or get_setting("database_relation", "host", "TIDB_RELATION_HOST", "127.0.0.1"),
+                "port": to_int(relation_url_parts.get("port") or get_setting("database_relation", "port", "TIDB_RELATION_PORT", 4000), 4000),
+                "user": relation_url_parts.get("user") or get_setting("database_relation", "user", "TIDB_RELATION_USER", "root"),
+                "password": relation_url_parts.get("password") or get_setting("database_relation", "password", "TIDB_RELATION_PASSWORD", ""),
+                "db_name": relation_url_parts.get("db_name") or get_setting("database_relation", "db_name", "TIDB_RELATION_DB", "gh_relation_db"),
                 "ssl_mode": get_setting("database_relation", "ssl_mode", "TIDB_RELATION_SSL", "REQUIRED"),
                 "ssl_ca": get_setting("database_relation", "ssl_ca", "TIDB_SSL_CA", ""),
                 "connect_timeout": to_int(get_setting("database_relation", "connect_timeout", "TIDB_RELATION_CONNECT_TIMEOUT", 5), 5),
             },
             "insight": {
-                "host": get_setting("database_insight", "host", "TIDB_INSIGHT_HOST", "127.0.0.1"),
-                "port": to_int(get_setting("database_insight", "port", "TIDB_INSIGHT_PORT", 4000), 4000),
-                "user": get_setting("database_insight", "user", "TIDB_INSIGHT_USER", "root"),
-                "password": get_setting("database_insight", "password", "TIDB_INSIGHT_PASSWORD", ""),
-                "db_name": get_setting("database_insight", "db_name", "TIDB_INSIGHT_DB", "gh_insight_db"),
+                "host": insight_url_parts.get("host") or get_setting("database_insight", "host", "TIDB_INSIGHT_HOST", "127.0.0.1"),
+                "port": to_int(insight_url_parts.get("port") or get_setting("database_insight", "port", "TIDB_INSIGHT_PORT", 4000), 4000),
+                "user": insight_url_parts.get("user") or get_setting("database_insight", "user", "TIDB_INSIGHT_USER", "root"),
+                "password": insight_url_parts.get("password") or get_setting("database_insight", "password", "TIDB_INSIGHT_PASSWORD", ""),
+                "db_name": insight_url_parts.get("db_name") or get_setting("database_insight", "db_name", "TIDB_INSIGHT_DB", "gh_insight_db"),
                 "ssl_mode": get_setting("database_insight", "ssl_mode", "TIDB_INSIGHT_SSL", "REQUIRED"),
                 "ssl_ca": get_setting("database_insight", "ssl_ca", "TIDB_SSL_CA", ""),
                 "connect_timeout": to_int(get_setting("database_insight", "connect_timeout", "TIDB_INSIGHT_CONNECT_TIMEOUT", 5), 5),
