@@ -1,24 +1,25 @@
-name: Daily Alpha Track (Discovery & Sync)
+name: 每周深度挖掘 (图分析与报告)
 
 on:
   schedule:
-    # 每天 UTC 0:00, 6:00, 12:00, 18:00 (北京时间 8:00, 14:00, 20:00, 次日 2:00)
-    - cron: '0 0,6,12,18 * * *'
+    # 每周六 UTC 16:00 (北京时间周日 0:00) 运行重度图分析
+    - cron: '0 16 * * 6'
   workflow_dispatch:
     inputs:
       task:
         description: 'Manual Trigger Task'
         required: true
-        default: 'daily_sync'
+        default: 'weekly_graph_build'
         type: choice
         options:
-        - daily_sync
-        - fetch_trending
-        - update_metrics
+        - weekly_graph_build
+        - intent_analysis
+        - generate_report
 
 jobs:
-  daily-tasks:
+  weekly-tasks:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # 图计算和全量分析可能需要很长时间
     env:
       # Database Connections
       TIDB_SOURCE_URL: ${{ secrets.TIDB_SOURCE_URL }}
@@ -40,7 +41,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       OPENAI_MODEL_NAME: ${{ secrets.OPENAI_MODEL_NAME }}
-      
+
       # Report Specialized LLM
       REPORT_LLM_API_KEY: ${{ secrets.REPORT_LLM_API_KEY }}
       REPORT_LLM_BASE_URL: ${{ secrets.REPORT_LLM_BASE_URL }}
@@ -82,8 +83,8 @@ jobs:
           echo "${{ secrets.GCP_B64_CREDENTIALS }}" | base64 -d > gcp-credentials.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcp-credentials.json" >> $GITHUB_ENV
 
-      - name: Run Daily Task
+      - name: Run Weekly Graph & Report Task
         run: |
-          TASK_NAME="${{ github.event.inputs.task || 'daily_sync' }}"
-          echo "Starting task: $TASK_NAME at $(date)"
+          TASK_NAME="${{ github.event.inputs.task || 'weekly_graph_build' }}"
+          echo "Starting heavy task: $TASK_NAME at $(date)"
           python main.py --task $TASK_NAME
