@@ -18,13 +18,31 @@ class DatabaseManager:
         """建立原始 MySQL 连接"""
         ssl_config = None
         if str(db_config.get("ssl_mode", "")).upper() == "REQUIRED":
-            ssl_ca = db_config.get("ssl_ca") or os.getenv("TIDB_SSL_CA") or "/etc/ssl/cert.pem"
-            if os.path.exists(ssl_ca):
-                ssl_config = {"ca": ssl_ca}
+            # TiDB Cloud Serverless 强制要求 SSL
+            ssl_config = {}
+            
+            # 尝试获取 CA 证书路径
+            ssl_ca = db_config.get("ssl_ca") or os.getenv("TIDB_SSL_CA")
+            
+            if ssl_ca and os.path.exists(ssl_ca):
+                ssl_config["ca"] = ssl_ca
             else:
-                logger.warning(
-                    "TiDB SSL 模式设为 REQUIRED 但未找到 CA 证书；将尝试无证书连接。"
-                )
+                # 尝试常见的系统证书路径 (适配 Ubuntu/GitHub Actions 等环境)
+                common_ca_paths = [
+                    "/etc/ssl/certs/ca-certificates.crt", # Debian/Ubuntu/GitHub Actions
+                    "/etc/pki/tls/certs/ca-bundle.crt",   # Fedora/RHEL
+                    "/etc/ssl/cert.pem",                  # macOS/Alpine
+                    "/etc/ssl/ca-bundle.pem",             # OpenSUSE
+                ]
+                for path in common_ca_paths:
+                    if os.path.exists(path):
+                        ssl_config["ca"] = path
+                        break
+                
+                if "ca" not in ssl_config:
+                    logger.warning(
+                        "TiDB SSL 模式设为 REQUIRED 但未找到系统 CA 证书；将尝试仅开启加密模式。"
+                    )
 
         connect_kwargs = {
             "host": db_config["host"],
