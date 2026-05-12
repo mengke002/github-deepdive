@@ -1,0 +1,49 @@
+name: Keepalive Workflow
+
+on:
+  schedule:
+    # 每月1号 0:00 运行一次 (足以维持 Action 活跃)
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # 允许手动触发测试
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    # 必须设置权限，否则会报之前你遇到的 "Repository access blocked"
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Update README Hidden Comment
+        run: |
+          # 配置 Git 信息
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          # 确保 README.md 存在
+          touch README.md
+
+          # 定义隐藏标记和当前时间
+          START_TAG="<!-- KEEPALIVE_START -->"
+          END_TAG="<!-- KEEPALIVE_END -->"
+          TIMESTAMP="Last updated: $(date)"
+
+          # 逻辑：如果 README 中没有标记，则追加；如果有，则替换中间的内容
+          if ! grep -q "$START_TAG" README.md; then
+            echo -e "\n$START_TAG\n$TIMESTAMP\n$END_TAG" >> README.md
+          else
+            # 使用 Perl 替换标记之间的内容（比 sed 处理多行更稳健）
+            perl -i -0777 -pe "s/$START_TAG.*?$END_TAG/$START_TAG\n$TIMESTAMP\n$END_TAG/s" README.md
+          fi
+
+          # 检查是否有变动，有变动则提交
+          git add README.md
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: keepalive [skip ci]"
+            git push
+          else
+            echo "No changes to commit"
+          fi
