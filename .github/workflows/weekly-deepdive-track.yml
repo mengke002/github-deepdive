@@ -1,0 +1,104 @@
+name: Weekly Deep Dive Track (Graph & Analysis)
+
+on:
+  schedule:
+    # 每周六 UTC 16:00 (北京时间周日 0:00) 运行重度图分析
+    - cron: '0 16 * * 6'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Manual Trigger Task'
+        required: true
+        default: 'weekly_graph_build'
+        type: choice
+        options:
+        - weekly_graph_build
+        - intent_analysis
+        - generate_report
+
+jobs:
+  weekly-tasks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 图计算和全量分析可能需要很长时间
+    env:
+      # Database Source
+      TIDB_SOURCE_HOST: ${{ secrets.TIDB_SOURCE_HOST }}
+      TIDB_SOURCE_PORT: ${{ secrets.TIDB_SOURCE_PORT }}
+      TIDB_SOURCE_USER: ${{ secrets.TIDB_SOURCE_USER }}
+      TIDB_SOURCE_PASSWORD: ${{ secrets.TIDB_SOURCE_PASSWORD }}
+      TIDB_SOURCE_DB: ${{ secrets.TIDB_SOURCE_DB || 'gh_source_db' }}
+      TIDB_SOURCE_SSL: ${{ secrets.TIDB_SOURCE_SSL || 'REQUIRED' }}
+      
+      # Database Relation
+      TIDB_RELATION_HOST: ${{ secrets.TIDB_RELATION_HOST }}
+      TIDB_RELATION_PORT: ${{ secrets.TIDB_RELATION_PORT }}
+      TIDB_RELATION_USER: ${{ secrets.TIDB_RELATION_USER }}
+      TIDB_RELATION_PASSWORD: ${{ secrets.TIDB_RELATION_PASSWORD }}
+      TIDB_RELATION_DB: ${{ secrets.TIDB_RELATION_DB || 'gh_relation_db' }}
+      TIDB_RELATION_SSL: ${{ secrets.TIDB_RELATION_SSL || 'REQUIRED' }}
+      
+      # Database Insight
+      TIDB_INSIGHT_HOST: ${{ secrets.TIDB_INSIGHT_HOST }}
+      TIDB_INSIGHT_PORT: ${{ secrets.TIDB_INSIGHT_PORT }}
+      TIDB_INSIGHT_USER: ${{ secrets.TIDB_INSIGHT_USER }}
+      TIDB_INSIGHT_PASSWORD: ${{ secrets.TIDB_INSIGHT_PASSWORD }}
+      TIDB_INSIGHT_DB: ${{ secrets.TIDB_INSIGHT_DB || 'gh_insight_db' }}
+      TIDB_INSIGHT_SSL: ${{ secrets.TIDB_INSIGHT_SSL || 'REQUIRED' }}
+      
+      # GitHub API
+      GITHUB_TOKEN_POOL: ${{ secrets.GITHUB_TOKEN_POOL }}
+      
+      # BigQuery
+      GCP_B64_CREDENTIALS: ${{ secrets.GCP_B64_CREDENTIALS }}
+      
+      # LLM API
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL_NAME: ${{ secrets.OPENAI_MODEL_NAME }}
+
+      # Report Specialized LLM
+      REPORT_LLM_API_KEY: ${{ secrets.REPORT_LLM_API_KEY }}
+      REPORT_LLM_BASE_URL: ${{ secrets.REPORT_LLM_BASE_URL }}
+      REPORT_LLM_MODEL_NAME: ${{ secrets.REPORT_LLM_MODEL_NAME }}
+
+      # Intent Analysis Specialized LLM
+      INTENT_LLM_API_KEY: ${{ secrets.INTENT_LLM_API_KEY }}
+      INTENT_LLM_BASE_URL: ${{ secrets.INTENT_LLM_BASE_URL }}
+      INTENT_LLM_MODEL_NAME: ${{ secrets.INTENT_LLM_MODEL_NAME }}
+      
+      # Notion
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+      
+      # Timezone
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright browsers (if needed for stealth crawler)
+        run: playwright install --with-deps chromium
+
+      - name: Generate GCP Credentials File
+        if: env.GCP_B64_CREDENTIALS != ''
+        run: |
+          echo "${{ secrets.GCP_B64_CREDENTIALS }}" | base64 -d > gcp-credentials.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/gcp-credentials.json" >> $GITHUB_ENV
+
+      - name: Run Weekly Graph & Report Task
+        run: |
+          TASK_NAME="${{ github.event.inputs.task || 'weekly_graph_build' }}"
+          echo "Starting heavy task: $TASK_NAME at $(date)"
+          python main.py --task $TASK_NAME

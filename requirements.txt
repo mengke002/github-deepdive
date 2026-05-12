@@ -1,0 +1,25 @@
+# Core Data & HTTP
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Database
+pymysql>=1.1.0
+
+# Google Cloud BigQuery
+google-cloud-bigquery>=3.11.0
+
+# Graph Algorithms
+networkx>=3.1
+
+# AI / LLM
+openai>=1.14.0
+
+# Stealth Crawler
+playwright>=1.40.0
+playwright-stealth>=1.0.6
+crawl4ai>=0.3.0
+
+# Others
+python-dotenv>=1.0.0
+html2text>=2020.1.16
