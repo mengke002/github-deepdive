@@ -115,9 +115,9 @@ def load_config(config_path="config.ini"):
         },
         "github": {
             # GitHub Token 可以是逗号分隔的字符串，以支持 Token Pool
-            "tokens": split_tokens(get_setting("github", "tokens", "GITHUB_TOKEN_POOL", "")),
+            "tokens": split_tokens(get_setting("github", "tokens", "GH_TOKEN_POOL", "")),
             "max_concurrent_requests": to_int(
-                get_setting("github", "max_concurrent_requests", "GITHUB_MAX_CONCURRENT_REQUESTS", 10),
+                get_setting("github", "max_concurrent_requests", "GH_MAX_CONCURRENT_REQUESTS", 10),
                 10,
             ),
         },

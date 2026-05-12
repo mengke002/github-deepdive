@@ -31,7 +31,7 @@ jobs:
       TIDB_INSIGHT_SSL: ${{ secrets.TIDB_INSIGHT_SSL || 'REQUIRED' }}
       
       # GitHub API
-      GITHUB_TOKEN_POOL: ${{ secrets.GITHUB_TOKEN_POOL }}
+      GH_TOKEN_POOL: ${{ secrets.GH_TOKEN_POOL }}
       
       # BigQuery
       GCP_B64_CREDENTIALS: ${{ secrets.GCP_B64_CREDENTIALS }}
