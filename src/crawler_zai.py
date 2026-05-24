@@ -37,7 +37,11 @@ class RepoAnalyzer:
         # 2. 长度过短（<120字）
         # 3. 包含 zread 占位符特征的内容
         needs_upgrade = []
-        placeholder_keywords = ["提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多"]
+        placeholder_keywords = [
+            "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
+            "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
+            "Private Repos", "Subscription", "Zread Discover Trending"
+        ]
         
         for name, summary in cache_map.items():
             is_placeholder = any(kw in summary for kw in placeholder_keywords)
@@ -69,7 +73,11 @@ class RepoAnalyzer:
                         content = result.markdown
                         
                         # 核心改进：检测是否为 zread 的“未索引”占位页面
-                        placeholder_keywords = ["提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多"]
+                        placeholder_keywords = [
+                            "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
+                            "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
+                            "Private Repos", "Subscription", "Zread Discover Trending"
+                        ]
                         if any(kw in content for kw in placeholder_keywords):
                             logger.info(f"检测到 zread 占位页面，跳过: {url}")
                             continue 
