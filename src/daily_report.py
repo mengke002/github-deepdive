@@ -16,6 +16,15 @@ def sanitize_ai_summary(text):
     """
     if not text: return "暂无解析。"
     
+    # 如果发现旧数据依然是完全没清理掉的占位符（例如英文无索引页面），直接返回托底信息
+    placeholder_keywords = [
+        "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
+        "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
+        "Private Repos", "Subscription", "Zread Discover Trending"
+    ]
+    if any(kw in text for kw in placeholder_keywords):
+        return "暂无解析。"
+
     # 1. 移除 Markdown 标题层级，保留加粗标题
     text = re.sub(r'^#+\s+.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'#+\s+(.*?)\n', r'**\1**\n', text)
@@ -51,6 +60,15 @@ def clean_summary_for_table(text):
     """针对纯文本展示进行的深度清洗和截断。"""
     if not text: return ""
     
+    # 如果发现旧数据依然是完全没清理掉的占位符（例如英文无索引页面），直接返回托底信息
+    placeholder_keywords = [
+        "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
+        "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
+        "Private Repos", "Subscription", "Zread Discover Trending"
+    ]
+    if any(kw in text for kw in placeholder_keywords):
+        return "暂无解析。"
+
     # 1. 移除 Markdown 标记（标题、图片、链接）
     text = re.sub(r'!\[.*?\]\(.*?\)', '', text) # 移除图片
     text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text) # 仅保留链接文本
