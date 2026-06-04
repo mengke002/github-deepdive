@@ -51,8 +51,14 @@ def sanitize_ai_summary(text):
             break
         text = new_text
     
-    # 7. 移除开头可能的“上次索引:[...]”
-    text = re.sub(r'^上次索引\s*[:：]\s*\[.*?\]\(.*?\)\s*', '', text.strip(), flags=re.IGNORECASE)
+    # 7. 移除开头可能的“上次索引:[...]” 及其之前的全部导航内容，以及紧跟的独立短导航词
+    # 先处理带有“上次索引:”的情况，往往前面都是网站噪音
+    text = re.sub(r'^.*?上次索引\s*[:：]\s*.*?\n', '', text.strip(), flags=re.IGNORECASE | re.DOTALL)
+    # 移除紧跟的简短导航词汇和空行
+    text = re.sub(r'^(\s*(快速入门|最新动态|资讯|深入解析|Overview|Quick\s*Start)\s*\n)+', '', text, flags=re.IGNORECASE)
+
+    # 8. 移除末尾多余的标点符号（逗号、顿号）和空白字符，确保结束干净
+    text = re.sub(r'[,，、\s]+$', '', text.strip())
     
     return text.strip()
 
@@ -69,6 +75,10 @@ def clean_summary_for_table(text):
     if any(kw in text for kw in placeholder_keywords):
         return "暂无解析。"
 
+    # 0. 移除前置网页噪音内容 (与 sanitize_ai_summary 保持一致)
+    text = re.sub(r'^.*?上次索引\s*[:：]\s*.*?\n', '', text.strip(), flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'^(\s*(快速入门|最新动态|资讯|深入解析|Overview|Quick\s*Start)\s*\n)+', '', text, flags=re.IGNORECASE)
+
     # 1. 移除 Markdown 标记（标题、图片、链接）
     text = re.sub(r'!\[.*?\]\(.*?\)', '', text) # 移除图片
     text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text) # 仅保留链接文本
@@ -82,7 +92,10 @@ def clean_summary_for_table(text):
     text = text.replace("|", " ")
     text = re.sub(r'\s+', ' ', text)
     
-    # 3. 增加截断长度至 300 字
+    # 3. 移除末尾多余的标点符号（逗号、顿号）和空白字符
+    text = re.sub(r'[,，、\s]+$', '', text.strip())
+
+    # 4. 增加截断长度至 300 字
     if len(text) > 300:
         text = text[:297] + "..."
     return text.strip()
