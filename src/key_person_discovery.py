@@ -37,6 +37,9 @@ class KeyPersonDiscovery:
             return
             
         # 3. 筛选并并发验证候选人
+        potential_kp = df_contributors['user_login'].unique()
+        total_potential = len(potential_kp)
+
         # 排除已是 KP 的用户 (一次性批量查询 DB)
         existing_kp_rows = db_manager.execute_query("SELECT login FROM users WHERE is_key_person = 1", db_type="source")
         existing_kp_set = {r['login'] for r in existing_kp_rows} if existing_kp_rows else set()
