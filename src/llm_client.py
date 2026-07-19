@@ -60,10 +60,12 @@ class LLMClient:
                                 return self._parse_json(content)
                             return content
                         
-                        logger.warning(f"模型 {model} 返回错误状态码: {response.status_code}, 内容: {response.text}")
-                        if response.status_code >= 500: # 仅对服务器错误重试
+                        logger.warning(f"模型 {model} 返回错误状态码: {response.status_code}, 内容: {response.text[:200]}...")
+                        if response.status_code in (403, 429) or response.status_code >= 500:
+                            # 针对 WAF 临时阻断 (403)、限流 (429) 或服务端错误 (5xx) 进行退避重试
+                            await asyncio.sleep(2 * (attempt + 1))
                             continue
-                        else: # 4xx 错误通常不需要在该模型上重试
+                        else:
                             break
                             
                     except Exception as e:
