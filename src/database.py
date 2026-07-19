@@ -105,12 +105,18 @@ class DatabaseManager:
             cursor.execute(query, params)
             return cursor.fetchall()
 
-    def execute_batch(self, query, params_list, db_type="source"):
-        """批量执行 SQL（如 INSERT INTO ... VALUES）"""
+    def execute_batch(self, query, params_list, db_type="source", batch_size=1000):
+        """批量分块执行 SQL（如 INSERT INTO ... VALUES）"""
+        if not params_list:
+            return 0
         conn = self.get_connection(db_type)
+        total_count = 0
         with conn.cursor() as cursor:
-            cursor.executemany(query, params_list)
-            return cursor.rowcount
+            for i in range(0, len(params_list), batch_size):
+                chunk = params_list[i:i + batch_size]
+                cursor.executemany(query, chunk)
+                total_count += cursor.rowcount
+        return total_count
 
     def close_all(self):
         """关闭所有已建立的连接"""

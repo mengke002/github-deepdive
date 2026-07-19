@@ -51,11 +51,20 @@ class GitHubClient:
                     return response.text
                 elif response.status_code == 204:
                     return None
-                elif response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0":
-                    # 处理速率限制
-                    reset_time = int(response.headers.get("X-RateLimit-Reset", time.time() + 60))
-                    sleep_duration = max(reset_time - time.time(), 10)
-                    logger.warning(f"达到 GitHub 速率限制。正在等待 {sleep_duration} 秒...")
+                elif response.status_code in (403, 429):
+                    remaining = response.headers.get("X-RateLimit-Remaining")
+                    retry_after = response.headers.get("Retry-After")
+                    
+                    if retry_after and retry_after.isdigit():
+                        sleep_duration = min(int(retry_after), 120)
+                    elif remaining == "0":
+                        reset_time = int(response.headers.get("X-RateLimit-Reset", time.time() + 60))
+                        sleep_duration = min(max(reset_time - time.time(), 10), 120)
+                    else:
+                        # Secondary Rate Limit (Abuse Prevention)
+                        sleep_duration = min(2 ** (i + 1) * 5, 120)
+                    
+                    logger.warning(f"GitHub API 限流/阻断 (HTTP {response.status_code})。重试 {i+1}/{max_retries}，等待 {sleep_duration} 秒: {url}")
                     time.sleep(sleep_duration)
                     continue
                 elif response.status_code == 404:

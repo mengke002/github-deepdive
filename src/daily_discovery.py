@@ -85,7 +85,10 @@ class DailyDiscovery:
             if res["starred"] and isinstance(res["starred"], list):
                 for repo in res["starred"]:
                     all_kp_stars.append(repo['full_name'])
-                    star_relations.append((repo['id'], uid, repo['full_name']))
+                    star_relations.append((
+                        repo['id'], uid, repo['full_name'],
+                        repo.get('description'), repo.get('stargazers_count', 0)
+                    ))
             
             # 处理元数据
             ud = res["user_data"]
@@ -183,14 +186,14 @@ class DailyDiscovery:
         """
         if not relations: return
         
-        # 1. 确保 repos 表中有这些仓库的基础信息
-        repo_names = list(set([r[2] for r in relations]))
-        metadata_map = get_repo_metadata(repo_names)
+        # 1. 确保 repos 表中有这些仓库的基础信息 (直接使用 API 抓取 Star 时返回的数据，不再重复请求 GitHub API)
+        unique_repos = {}
+        for r in relations:
+            rid, uid, fn, desc, stars = r
+            if rid not in unique_repos:
+                unique_repos[rid] = (rid, fn, desc, stars)
         
-        repo_records = []
-        for fn, meta in metadata_map.items():
-            repo_records.append((meta['id'], fn, meta['description'], meta['stargazers_count']))
-        
+        repo_records = list(unique_repos.values())
         if repo_records:
             sql_repo = "INSERT IGNORE INTO repos (id, full_name, description, stargazers_count) VALUES (%s, %s, %s, %s)"
             db_manager.execute_batch(sql_repo, repo_records, db_type="source")
@@ -198,7 +201,7 @@ class DailyDiscovery:
         # 2. 写入关系表
         rel_records = []
         now = datetime.now()
-        for rid, uid, _ in relations:
+        for rid, uid, _, _, _ in relations:
             rel_records.append((rid, uid, 'STARGAZER', 1.0, now, now))
         
         sql_rel = """

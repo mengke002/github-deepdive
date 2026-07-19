@@ -37,10 +37,11 @@ class KeyPersonDiscovery:
             return
             
         # 3. 筛选并并发验证候选人
-        potential_kp = df_contributors['user_login'].unique()
-        total_potential = len(potential_kp)
-        # 排除已是 KP 的用户 (批量查询)
-        potential_kp_list = potential_kp.tolist()[:500] # 扩大扫描范围到 500
+        # 排除已是 KP 的用户 (一次性批量查询 DB)
+        existing_kp_rows = db_manager.execute_query("SELECT login FROM users WHERE is_key_person = 1", db_type="source")
+        existing_kp_set = {r['login'] for r in existing_kp_rows} if existing_kp_rows else set()
+
+        potential_kp_list = [u for u in potential_kp if u not in existing_kp_set][:500]
         
         logger.info(f"从热门项目贡献者中发现 {total_potential} 位候选人，正在并发验证前 {len(potential_kp_list)} 位...")
         
@@ -48,10 +49,6 @@ class KeyPersonDiscovery:
 
         async def _validate_potential_kp(login):
             async with sem:
-                # 再次检查数据库避免重复
-                existing = db_manager.execute_query(f"SELECT id FROM users WHERE login='{login}' AND is_key_person=1", db_type="source")
-                if existing: return None
-                
                 user_data = await asyncio.to_thread(github_client.request, "GET", f"https://api.github.com/users/{login}")
                 if not user_data: return None
                 

@@ -97,8 +97,49 @@ def process_commit(commit_info):
 def get_repo_metadata(full_names):
     """Fetches repository IDs and basic metadata for unique repo names."""
     metadata = {}
-    unique_names = list(set(full_names))
-    logger.info(f"Fetching metadata for {len(unique_names)} unique repositories...")
+    unique_names = list(set([n for n in full_names if n]))
+    if not unique_names:
+        return metadata
+    
+    # 优先查数据库缓存，降低 GitHub API 调用频率
+    needed_names = unique_names
+    try:
+        from .database import db_manager
+        existing = {}
+        for i in range(0, len(unique_names), 500):
+            chunk = unique_names[i:i+500]
+            format_strings = ','.join(['%s'] * len(chunk))
+            sql = f"SELECT id, full_name, description, language, stargazers_count, forks_count, open_issues_count, updated_at FROM repos WHERE full_name IN ({format_strings})"
+            rows = db_manager.execute_query(sql, chunk, db_type="source")
+            for r in rows:
+                existing[r["full_name"]] = {
+                    "id": r["id"],
+                    "full_name": r["full_name"],
+                    "owner_id": 0,
+                    "owner_type": "User",
+                    "description": r.get("description"),
+                    "homepage": None,
+                    "language": r.get("language"),
+                    "stargazers_count": r.get("stargazers_count"),
+                    "forks_count": r.get("forks_count"),
+                    "open_issues_count": r.get("open_issues_count"),
+                    "created_at": None,
+                    "updated_at": str(r.get("updated_at")) if r.get("updated_at") else None,
+                    "pushed_at": None,
+                    "license": None
+                }
+        needed_names = [n for n in unique_names if n not in existing]
+        metadata.update(existing)
+        if existing:
+            logger.info(f"Metadata lookup: {len(existing)} cached in DB, {len(needed_names)} to fetch from API.")
+    except Exception as e:
+        logger.warning(f"Failed to query DB cache for repo metadata: {e}")
+        needed_names = unique_names
+
+    if not needed_names:
+        return metadata
+
+    logger.info(f"Fetching metadata for {len(needed_names)} unique repositories from GitHub API...")
     
     def fetch_one(name):
         repo_data = github_client.get_repo(name)
@@ -106,8 +147,8 @@ def get_repo_metadata(full_names):
             return name, {
                 "id": repo_data["id"],
                 "full_name": repo_data["full_name"],
-                "owner_id": repo_data["owner"]["id"],
-                "owner_type": repo_data["owner"]["type"],
+                "owner_id": repo_data.get("owner", {}).get("id", 0),
+                "owner_type": repo_data.get("owner", {}).get("type", "User"),
                 "description": repo_data.get("description"),
                 "homepage": repo_data.get("homepage"),
                 "language": repo_data.get("language"),
@@ -121,8 +162,8 @@ def get_repo_metadata(full_names):
             }
         return name, None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_name = {executor.submit(fetch_one, name): name for name in unique_names}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_name = {executor.submit(fetch_one, name): name for name in needed_names}
         for future in concurrent.futures.as_completed(future_to_name):
             name, res = future.result()
             if res:
