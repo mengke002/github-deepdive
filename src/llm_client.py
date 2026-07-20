@@ -2,7 +2,7 @@ import logging
 import json
 import re
 import asyncio
-import httpx
+from openai import AsyncOpenAI
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,11 @@ class LLMClient:
         self.base_url = base_url.rstrip('/')
         self.model_names = model_names
         self.timeout = 90.0
+        self.client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout
+        )
 
     async def chat(
         self, 
@@ -34,42 +39,48 @@ class LLMClient:
             logger.error("LLM 配置缺失: api_key 或 model_names 为空")
             return None
 
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": temperature
-        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for model in self.model_names:
-                payload["model"] = model
-                for attempt in range(max_retries + 1):
-                    try:
-                        logger.info(f"正在使用模型 {model} 发起请求 (尝试 {attempt + 1})...")
-                        response = await client.post(
-                            f"{self.base_url}/chat/completions",
-                            json=payload,
-                            headers={"Authorization": f"Bearer {self.api_key}"}
-                        )
+        for model in self.model_names:
+            for attempt in range(max_retries + 1):
+                try:
+                    logger.info(f"正在使用模型 {model} 发起请求 (尝试 {attempt + 1})...")
+                    # 使用 stream=True 可以兼容某些代理端点返回的不规范级联 JSON
+                    response = await self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=temperature,
+                        stream=True
+                    )
+
+                    content_chunks = []
+                    async for chunk in response:
+                        if hasattr(chunk, 'choices') and chunk.choices:
+                            delta = chunk.choices[0].delta
+                            if hasattr(delta, 'content') and delta.content:
+                                content_chunks.append(delta.content)
+
+                    content = "".join(content_chunks).strip()
                         
-                        if response.status_code == 200:
-                            content = response.json()['choices'][0]['message']['content'].strip()
-                            if json_mode:
-                                return self._parse_json(content)
-                            return content
+                    if json_mode:
+                        return self._parse_json(content)
+                    return content
                         
-                        logger.warning(f"模型 {model} 返回错误状态码: {response.status_code}, 内容: {response.text[:200]}...")
-                        if response.status_code in (403, 429) or response.status_code >= 500:
-                            # 针对 WAF 临时阻断 (403)、限流 (429) 或服务端错误 (5xx) 进行退避重试
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.warning(f"模型 {model} 请求出错: {error_msg}")
+
+                    # Basic retry logic for status codes if they are in the error message, or typical network errors
+                    if "403" in error_msg or "429" in error_msg or "500" in error_msg or "502" in error_msg or "503" in error_msg or "504" in error_msg:
+                        if attempt < max_retries:
                             await asyncio.sleep(2 * (attempt + 1))
                             continue
                         else:
                             break
-                            
-                    except Exception as e:
-                        logger.error(f"模型 {model} 请求出错: {str(e)}")
+                    else:
                         if attempt < max_retries:
                             await asyncio.sleep(1)
                             continue
