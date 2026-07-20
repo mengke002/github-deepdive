@@ -15,16 +15,16 @@ class IntentDetector:
     """
 
     def __init__(self):
+        self.settings = load_config()
         self._llm_client = None
 
     @property
     def llm_client(self):
         if self._llm_client is None:
-            settings = load_config()
             # 优先使用专门的 intent_llm 配置，否则回退到通用 llm 配置
-            llm_conf = settings.get("intent_llm", {})
+            llm_conf = self.settings.get("intent_llm", {})
             if not llm_conf.get("api_key"):
-                llm_conf = settings.get("llm", {})
+                llm_conf = self.settings.get("llm", {})
 
             self._llm_client = LLMClient(
                 api_key=llm_conf.get("api_key"),

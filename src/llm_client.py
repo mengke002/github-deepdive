@@ -75,7 +75,9 @@ class LLMClient:
                         
                 except Exception as e:
                     error_msg = str(e)
-                    logger.warning(f"模型 {model} 请求出错: {error_msg}")
+                    # 截断过长的错误信息 (例如 Render 的 403 HTML 页面)，避免日志刷屏
+                    display_msg = error_msg if len(error_msg) < 300 else error_msg[:300] + " ... [截断过多错误信息]"
+                    logger.warning(f"模型 {model} 请求出错: {display_msg}")
 
                     # Basic retry logic for status codes if they are in the error message, or typical network errors
                     if "403" in error_msg or "429" in error_msg or "500" in error_msg or "502" in error_msg or "503" in error_msg or "504" in error_msg:
