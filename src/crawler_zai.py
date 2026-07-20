@@ -139,7 +139,15 @@ class RepoAnalyzer:
         )
 
         from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=120.0)
+        client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=120.0,
+            default_headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json"
+            }
+        )
 
         async with self.llm_semaphore:
             for attempt in range(3):
