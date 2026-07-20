@@ -68,7 +68,13 @@ class RepoAnalyzer:
             urls = [f"https://zread.ai/{full_name}/1-overview", f"https://zread.ai/{full_name}"]
             for url in urls:
                 try:
-                    result = await crawler.arun(url=url, bypass_cache=True)
+                    # 使用 anti-bot 特性：magic=True (模拟真实用户环境，抗指纹检测)
+                    result = await crawler.arun(
+                        url=url,
+                        bypass_cache=True,
+                        magic=True,
+                        delay_before_return_html=2.0
+                    )
                     if result.success and result.markdown:
                         content = result.markdown
                         
@@ -132,43 +138,51 @@ class RepoAnalyzer:
             '[{"name": "owner/repo", "summary": "摘要内容"}, ...]'
         )
 
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=120.0)
+
         async with self.llm_semaphore:
             for attempt in range(3):
                 for model in self.models:
                     try:
                         logger.info(f"正在使用 {model} 进行批处理 LLM 分析 ({len(names)} 个项目)...")
-                        payload = {
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": "\n".join(prompt_content)}
-                            ],
-                            "temperature": 0.2
-                        }
-                        resp = await asyncio.to_thread(
-                            requests.post, f"{self.base_url}/chat/completions", 
-                            json=payload, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=120
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": "\n".join(prompt_content)}
+                        ]
+
+                        response = await client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.2,
+                            stream=True
                         )
                         
-                        if resp.status_code == 200:
-                            raw_content = resp.json()['choices'][0]['message']['content'].strip()
-                            try:
-                                if "```json" in raw_content:
-                                    raw_content = re.search(r'```json\s*(.*?)\s*```', raw_content, re.DOTALL).group(1)
+                        content_chunks = []
+                        async for chunk in response:
+                            if hasattr(chunk, 'choices') and chunk.choices:
+                                delta = chunk.choices[0].delta
+                                if hasattr(delta, 'content') and delta.content:
+                                    content_chunks.append(delta.content)
                                 
-                                data = json.loads(raw_content)
-                                if isinstance(data, dict) and "repos" in data: data = data["repos"]
-                                if not isinstance(data, list): data = [data]
-                                
-                                # 重要：LLM 生成的摘要统一带上 [自动托底] 标记，确保未来有机会升级为 zread
-                                results = {item['name']: f"[自动托底] {item['summary']}" for item in data if 'name' in item and 'summary' in item}
-                                self._save_summaries_to_cache(results)
-                                return results
-                            except Exception as parse_err:
-                                logger.error(f"解析 LLM JSON 响应失败: {parse_err}")
-                                continue
-                        else:
-                            logger.warning(f"LLM {model} 请求失败: {resp.status_code}")
+                        raw_content = "".join(content_chunks).strip()
+
+                        try:
+                            if "```json" in raw_content:
+                                raw_content = re.search(r'```json\s*(.*?)\s*```', raw_content, re.DOTALL).group(1)
+
+                            data = json.loads(raw_content)
+                            if isinstance(data, dict) and "repos" in data: data = data["repos"]
+                            if not isinstance(data, list): data = [data]
+
+                            # 重要：LLM 生成的摘要统一带上 [自动托底] 标记，确保未来有机会升级为 zread
+                            results = {item['name']: f"[自动托底] {item['summary']}" for item in data if 'name' in item and 'summary' in item}
+                            self._save_summaries_to_cache(results)
+                            return results
+                        except Exception as parse_err:
+                            logger.error(f"解析 LLM JSON 响应失败: {parse_err}")
+                            continue
+
                     except Exception as e:
                         logger.warning(f"LLM {model} 异常: {e}")
                         continue
