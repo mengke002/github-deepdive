@@ -15,17 +15,23 @@ class IntentDetector:
     """
 
     def __init__(self):
-        self.settings = load_config()
-        # 优先使用专门的 intent_llm 配置，否则回退到通用 llm 配置
-        llm_conf = self.settings.get("intent_llm", {})
-        if not llm_conf.get("api_key"):
-            llm_conf = self.settings.get("llm", {})
-            
-        self.llm_client = LLMClient(
-            api_key=llm_conf.get("api_key"),
-            base_url=llm_conf.get("base_url"),
-            model_names=llm_conf.get("model_names")
-        )
+        self._llm_client = None
+
+    @property
+    def llm_client(self):
+        if self._llm_client is None:
+            settings = load_config()
+            # 优先使用专门的 intent_llm 配置，否则回退到通用 llm 配置
+            llm_conf = settings.get("intent_llm", {})
+            if not llm_conf.get("api_key"):
+                llm_conf = settings.get("llm", {})
+
+            self._llm_client = LLMClient(
+                api_key=llm_conf.get("api_key"),
+                base_url=llm_conf.get("base_url"),
+                model_names=llm_conf.get("model_names")
+            )
+        return self._llm_client
 
     def _is_low_quality(self, data):
         """检测分析结果是否质量较低（如英文过多或全是待挖掘）"""
@@ -71,7 +77,11 @@ class IntentDetector:
                 body = issue.get("body", "") or ""
                 issue_lines.append(f"- [Issue] {title} (标签: {', '.join(labels)})\n  内容: {body[:300]}")
         
-        context = f"项目描述: {description}\n\nREADME 摘要:\n{readme_summary}\n\n最近热门 Issue 摘要:\n" + "\n".join(issue_lines)
+        issues_summary = "\n".join(issue_lines)
+        # 限制 issues 总结部分的长度，避免过长的 payload 被反向代理/WAF 阻断 (403/413)
+        issues_summary = issues_summary[:3000]
+
+        context = f"项目描述: {description}\n\nREADME 摘要:\n{readme_summary}\n\n最近热门 Issue 摘要:\n{issues_summary}"
         return context
 
     async def analyze_intent_batch(self, full_names):
