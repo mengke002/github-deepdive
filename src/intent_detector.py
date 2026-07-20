@@ -77,11 +77,7 @@ class IntentDetector:
                 body = issue.get("body", "") or ""
                 issue_lines.append(f"- [Issue] {title} (标签: {', '.join(labels)})\n  内容: {body[:300]}")
         
-        issues_summary = "\n".join(issue_lines)
-        # 限制 issues 总结部分的长度，避免过长的 payload 被反向代理/WAF 阻断 (403/413)
-        issues_summary = issues_summary[:3000]
-
-        context = f"项目描述: {description}\n\nREADME 摘要:\n{readme_summary}\n\n最近热门 Issue 摘要:\n{issues_summary}"
+        context = f"项目描述: {description}\n\nREADME 摘要:\n{readme_summary}\n\n最近热门 Issue 摘要:\n" + "\n".join(issue_lines)
         return context
 
     async def analyze_intent_batch(self, full_names):
