@@ -123,6 +123,13 @@ class GitHubClient:
                 logger.error(f"解析文件内容失败 {full_name}/{path}: {e}")
         return None
 
+    def graphql(self, query, variables=None):
+        """执行 GitHub GraphQL API 请求"""
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+        return self.request("POST", "https://api.github.com/graphql", json=payload)
+
     def get_readme(self, full_name):
         """获取仓库 README 内容 (经过 Base64 解码)"""
         import base64
@@ -137,3 +144,4 @@ class GitHubClient:
         return ""
 
 github_client = GitHubClient()
+

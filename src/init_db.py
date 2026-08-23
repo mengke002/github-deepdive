@@ -199,7 +199,55 @@ def init_insight_db():
         """)
     logger.info("Insight DB tables initialized.")
 
-if __name__ == "__main__":
+def init_kb_db():
+    """独立初始化 KB 知识库项目池表（手动/独立任务专用）"""
+    conn = db_manager.get_connection("kb")
+    with conn.cursor() as cursor:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS kb_project_pool (
+            id BIGINT PRIMARY KEY,
+            full_name VARCHAR(150) NOT NULL UNIQUE,
+            owner VARCHAR(80) NOT NULL,
+            name VARCHAR(80) NOT NULL,
+            description TEXT,
+            language VARCHAR(50),
+            topics JSON,
+            topics_str VARCHAR(500),
+            homepage VARCHAR(500),
+            license VARCHAR(50),
+            stargazers_count INT DEFAULT 0,
+            forks_count INT DEFAULT 0,
+            open_issues_count INT DEFAULT 0,
+            recent_stars_9m INT DEFAULT 0,
+            recent_pushes_9m INT DEFAULT 0,
+            recent_prs_9m INT DEFAULT 0,
+            active_contributors_9m INT DEFAULT 0,
+            last_event_at DATETIME,
+            created_at DATETIME,
+            pushed_at DATETIME,
+            discovery_source VARCHAR(50),
+            is_seed BOOLEAN DEFAULT FALSE,
+            is_key_person_related BOOLEAN DEFAULT FALSE,
+            composite_health_score FLOAT DEFAULT 0.0,
+            readme_snippet TEXT,
+            status VARCHAR(30) DEFAULT 'ACTIVE',
+            created_at_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_stars (stargazers_count),
+            INDEX idx_health (composite_health_score),
+            INDEX idx_lang (language),
+            INDEX idx_last_event (last_event_at),
+            INDEX idx_source (discovery_source)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        """)
+    logger.info("KB 项目池数据表 (kb_project_pool) 初始化完成。")
+
+def init_all():
+    """日常自动化任务库表初始化 (source, relation, insight)"""
     init_source_db()
     init_relation_db()
     init_insight_db()
+
+if __name__ == "__main__":
+    init_all()
+

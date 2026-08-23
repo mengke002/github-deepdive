@@ -70,14 +70,15 @@ def load_config(config_path="config.ini"):
         except (TypeError, ValueError):
             return default
 
-    # Database URLs
     source_url = get_setting("database_source", "url", "TIDB_SOURCE_URL")
     relation_url = get_setting("database_relation", "url", "TIDB_RELATION_URL")
     insight_url = get_setting("database_insight", "url", "TIDB_INSIGHT_URL")
+    kb_url = get_setting("database_kb", "url", "TIDB_KB_URL")
 
     source_url_parts = parse_db_url(source_url)
     relation_url_parts = parse_db_url(relation_url)
     insight_url_parts = parse_db_url(insight_url)
+    kb_url_parts = parse_db_url(kb_url)
 
     # 构造并返回配置字典 (模拟 rss-info-collector 的最佳实践)
     settings = {
@@ -111,6 +112,16 @@ def load_config(config_path="config.ini"):
                 "ssl_mode": get_setting("database_insight", "ssl_mode", "TIDB_INSIGHT_SSL", "REQUIRED"),
                 "ssl_ca": get_setting("database_insight", "ssl_ca", "TIDB_SSL_CA", ""),
                 "connect_timeout": to_int(get_setting("database_insight", "connect_timeout", "TIDB_INSIGHT_CONNECT_TIMEOUT", 5), 5),
+            },
+            "kb": {
+                "host": kb_url_parts.get("host") or get_setting("database_kb", "host", "TIDB_KB_HOST", "127.0.0.1"),
+                "port": to_int(kb_url_parts.get("port") or get_setting("database_kb", "port", "TIDB_KB_PORT", 4000), 4000),
+                "user": kb_url_parts.get("user") or get_setting("database_kb", "user", "TIDB_KB_USER", "root"),
+                "password": kb_url_parts.get("password") or get_setting("database_kb", "password", "TIDB_KB_PASSWORD", ""),
+                "db_name": kb_url_parts.get("db_name") or get_setting("database_kb", "db_name", "TIDB_KB_DB", "gh_kb_pool"),
+                "ssl_mode": get_setting("database_kb", "ssl_mode", "TIDB_KB_SSL", "REQUIRED"),
+                "ssl_ca": get_setting("database_kb", "ssl_ca", "TIDB_SSL_CA", ""),
+                "connect_timeout": to_int(get_setting("database_kb", "connect_timeout", "TIDB_KB_CONNECT_TIMEOUT", 5), 5),
             }
         },
         "github": {

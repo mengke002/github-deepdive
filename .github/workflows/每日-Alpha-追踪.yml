@@ -2,8 +2,8 @@ name: 每日 Alpha 追踪 (发现与同步)
 
 on:
   schedule:
-    # 每天 UTC 0:00, 6:00, 12:00, 18:00 (北京时间 8:00, 14:00, 20:00, 次日 2:00)
-    - cron: '0 0,6,12,18 * * *'
+    # 每天 UTC 0:00 (北京时间早晨 8:00) 运行一次完整的每日 Alpha 汇总早报
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       task:

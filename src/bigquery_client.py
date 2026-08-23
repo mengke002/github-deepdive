@@ -52,76 +52,91 @@ class BigQueryClient:
 
     def get_core_contributors_for_seeds(self, repo_ids, months=None):
         """
-        第一层扩展：通过项目 ID 和月份过滤获取核心贡献者，以节省成本。
-        months: 形如 ['202601', '202602'] 的字符串列表
+        第一层扩展：通过项目 ID 和月份过滤获取核心贡献者。
+        采用按月迭代分片查询，确保在 BigQuery Sandbox 沙盒模式下永不超限。
         """
         if not repo_ids:
             return pd.DataFrame()
             
         repo_list_str = ", ".join([str(rid) for rid in repo_ids])
         
-        # 默认查询最近 3 个月，以兼顾覆盖面和成本
         if not months:
             now = datetime.now()
-            months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(3)]
+            months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(2)]
             
-        month_filter = ", ".join([f"'{m}'" for m in months])
-        
-        sql = f"""
-        SELECT 
-            repo.id as repo_id,
-            repo.name as repo_name,
-            actor.id as user_id,
-            actor.login as user_login,
-            COUNT(*) as activity_count
-        FROM `githubarchive.month.*`
-        WHERE _TABLE_SUFFIX IN ({month_filter})
-          AND repo.id IN ({repo_list_str})
-          AND type IN ('PullRequestEvent', 'PushEvent', 'IssuesEvent')
-          AND actor.login NOT LIKE '%bot%'
-        GROUP BY repo_id, repo_name, user_id, user_login
-        QUALIFY ROW_NUMBER() OVER(PARTITION BY repo_id ORDER BY activity_count DESC) <= 30
-        """
-        return self.query(sql)
+        dfs = []
+        for m in months:
+            sql = f"""
+            SELECT 
+                repo.id as repo_id,
+                repo.name as repo_name,
+                actor.id as user_id,
+                actor.login as user_login,
+                COUNT(*) as activity_count
+            FROM `githubarchive.month.{m}`
+            WHERE repo.id IN ({repo_list_str})
+              AND type IN ('PullRequestEvent', 'PushEvent', 'IssuesEvent')
+              AND actor.login NOT LIKE '%bot%'
+            GROUP BY repo_id, repo_name, user_id, user_login
+            QUALIFY ROW_NUMBER() OVER(PARTITION BY repo_id ORDER BY activity_count DESC) <= 30
+            """
+            df_m = self.query(sql)
+            if not df_m.empty:
+                dfs.append(df_m)
+
+        if not dfs:
+            return pd.DataFrame()
+            
+        combined = pd.concat(dfs, ignore_index=True)
+        agg = combined.groupby(['repo_id', 'repo_name', 'user_id', 'user_login'], as_index=False)['activity_count'].sum()
+        return agg.sort_values(by=['repo_id', 'activity_count'], ascending=[True, False])
 
     def discover_related_repos_by_users(self, user_logins, exclude_repos=None, limit_per_user=10, months=None):
         """
         第二层扩展：寻找种子贡献者参与过的其他项目。
-        采用平衡策略：默认使用 6 个月的窗口，确保新项目覆盖的同时避免扫描过多全量数据。
+        采用按月分片迭代查询，彻底规避 BigQuery 沙盒模式单次查询体积限制。
         """
         if not user_logins:
             return pd.DataFrame()
             
         if not months:
-            # 平衡策略：使用最近 6 个月的数据
             now = datetime.now()
-            months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(6)]
+            months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(2)]
             
-        month_filter = ", ".join([f"'{m}'" for m in months])
         user_list_str = ", ".join([f"'{login}'" for login in user_logins])
         
         exclude_clause = ""
         if exclude_repos:
-            # 限制排除列表长度，防止 SQL 语句过长
             exclude_list_str = ", ".join([f"'{name}'" for name in exclude_repos[:2000]])
             exclude_clause = f"AND repo.name NOT IN ({exclude_list_str})"
 
-        sql = f"""
-        SELECT 
-            actor.id as user_id,
-            actor.login as user_login,
-            repo.id as repo_id,
-            repo.name as repo_name,
-            COUNT(*) as contribution_count
-        FROM `githubarchive.month.*`
-        WHERE _TABLE_SUFFIX IN ({month_filter})
-          AND actor.login IN ({user_list_str})
-          AND type IN ('PullRequestEvent', 'PushEvent', 'IssuesEvent')
-          {exclude_clause}
-        GROUP BY user_id, user_login, repo_id, repo_name
-        QUALIFY ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY contribution_count DESC) <= {limit_per_user}
-        """
-        return self.query(sql)
+        dfs = []
+        for m in months:
+            sql = f"""
+            SELECT 
+                actor.id as user_id,
+                actor.login as user_login,
+                repo.id as repo_id,
+                repo.name as repo_name,
+                COUNT(*) as contribution_count
+            FROM `githubarchive.month.{m}`
+            WHERE actor.login IN ({user_list_str})
+              AND type IN ('PullRequestEvent', 'PushEvent', 'IssuesEvent')
+              {exclude_clause}
+            GROUP BY user_id, user_login, repo_id, repo_name
+            QUALIFY ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY contribution_count DESC) <= {limit_per_user}
+            """
+            df_m = self.query(sql)
+            if not df_m.empty:
+                dfs.append(df_m)
+
+        if not dfs:
+            return pd.DataFrame()
+            
+        combined = pd.concat(dfs, ignore_index=True)
+        agg = combined.groupby(['user_id', 'user_login', 'repo_id', 'repo_name'], as_index=False)['contribution_count'].sum()
+        return agg.sort_values(by=['user_id', 'contribution_count'], ascending=[True, False])
+
 
     def test_connection(self):
         """测试连接"""

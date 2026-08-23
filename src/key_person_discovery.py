@@ -27,9 +27,9 @@ class KeyPersonDiscovery:
         
         repo_ids = [r['id'] for r in repos]
         
-        # 2. 从 BigQuery 获取过去 6 个月的核心贡献者
+        # 2. 从 BigQuery 获取过去 2 个月的核心贡献者 (兼顾即时性并节省沙盒日配额)
         now = datetime.now()
-        months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(6)]
+        months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(2)]
         
         df_contributors = bigquery_client.get_core_contributors_for_seeds(repo_ids, months=months)
         if df_contributors.empty:
