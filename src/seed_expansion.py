@@ -1,5 +1,6 @@
 import logging
 import pandas as pd
+from datetime import datetime, timedelta
 from .bigquery_client import bigquery_client
 from .database import db_manager
 from .github_client import github_client
@@ -29,8 +30,10 @@ class SeedExpansion:
             
         seed_ids = [s['id'] for s in seeds]
         
-        # 2. 查询 BigQuery 获取核心贡献者
-        df_l1 = bigquery_client.get_core_contributors_for_seeds(seed_ids)
+        # 2. 查询 BigQuery 获取核心贡献者 (默认近 2 天单日分表)
+        now = datetime.now()
+        days = [(now - timedelta(days=i)).strftime("%Y%m%d") for i in [1, 2]]
+        df_l1 = bigquery_client.get_core_contributors_for_seeds(seed_ids, days=days)
         if df_l1.empty:
             logger.warning("BigQuery 未返回任何种子仓库的贡献者。")
             return
@@ -40,7 +43,7 @@ class SeedExpansion:
         # 3. 将关系同步到 TiDB
         self._sync_relations_to_db(df_l1)
 
-    def expand_layer_2(self, limit_per_user=10):
+    def expand_layer_2(self, limit_per_user=10, days=None):
         """
         第二层扩展：寻找核心贡献者活跃的其他项目。
         """
@@ -71,8 +74,17 @@ class SeedExpansion:
         seeds = db_manager.execute_query("SELECT full_name FROM repos", db_type="source")
         existing_repos = [s['full_name'] for s in seeds]
 
-        # 4. 查询 BQ 获取他们参与的其他项目
-        df_l2 = bigquery_client.discover_related_repos_by_users(user_logins, exclude_repos=existing_repos, limit_per_user=limit_per_user)
+        # 4. 查询 BQ 获取他们参与的其他项目 (优先单日分表模式)
+        if not days:
+            now = datetime.now()
+            days = [(now - timedelta(days=i)).strftime("%Y%m%d") for i in [1, 2]]
+
+        df_l2 = bigquery_client.discover_related_repos_by_users(
+            user_logins, 
+            exclude_repos=existing_repos, 
+            limit_per_user=limit_per_user,
+            days=days
+        )
         if df_l2.empty:
             logger.info("未通过 BQ 发现新的关联仓库。")
             return

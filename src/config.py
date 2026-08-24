@@ -136,6 +136,10 @@ def load_config(config_path="config.ini"):
             "credentials_path": get_setting("bigquery", "credentials_path", "GOOGLE_APPLICATION_CREDENTIALS", "./gcp-credentials.json"),
             "project_id": get_setting("bigquery", "project_id", "GOOGLE_CLOUD_PROJECT", ""),
         },
+        "bigquery_kb": {
+            "credentials_path": get_setting("bigquery_kb", "credentials_path", "GOOGLE_APPLICATION_CREDENTIALS_KB", "./github-deepdive-gcp-credentials.json"),
+            "project_id": get_setting("bigquery_kb", "project_id", "GOOGLE_CLOUD_PROJECT_KB", "github-deepdive"),
+        },
         "llm": {
             "api_key": get_setting("llm", "api_key", "OPENAI_API_KEY", "", aliases=["llm"], key_aliases=["openai_api_key"]),
             "base_url": get_setting("llm", "base_url", "OPENAI_BASE_URL", "https://api.openai.com/v1", aliases=["llm"], key_aliases=["openai_base_url"]),

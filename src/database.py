@@ -98,6 +98,11 @@ class DatabaseManager:
             logger.error(f"连接到 {db_type} 数据库失败: {e}")
             raise
 
+    def create_connection(self, db_type="source"):
+        """创建独立的数据库新连接（线程安全，适合多线程并发使用）"""
+        db_config = self.settings["database"][db_type]
+        return self._connect_raw(db_config, database=db_config["db_name"])
+
     def execute_query(self, query, params=None, db_type="source"):
         """执行 SQL 查询并返回所有结果"""
         conn = self.get_connection(db_type)

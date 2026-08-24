@@ -70,6 +70,11 @@ class GitHubClient:
                 elif response.status_code == 404:
                     logger.info(f"未找到资源: {url}")
                     return None
+                elif response.status_code in (500, 502, 503, 504):
+                    sleep_duration = min(2 ** (i + 1) * 2, 30)
+                    logger.warning(f"GitHub 服务端波动 (HTTP {response.status_code})。重试 {i+1}/{max_retries}，等待 {sleep_duration} 秒: {url}")
+                    time.sleep(sleep_duration)
+                    continue
                 else:
                     logger.error(f"GitHub API 错误 {response.status_code}: {response.text}")
                     if i < max_retries - 1:

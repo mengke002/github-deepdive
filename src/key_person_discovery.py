@@ -27,11 +27,11 @@ class KeyPersonDiscovery:
         
         repo_ids = [r['id'] for r in repos]
         
-        # 2. 从 BigQuery 获取过去 2 个月的核心贡献者 (兼顾即时性并节省沙盒日配额)
+        # 2. 从 BigQuery 获取过去 2~3 天的核心贡献者 (单日细粒度分表，单次扫描仅 ~200MB，极度节省配额)
         now = datetime.now()
-        months = [(now - timedelta(days=30*i)).strftime("%Y%m") for i in range(2)]
+        days = [(now - timedelta(days=i)).strftime("%Y%m%d") for i in [1, 2]]
         
-        df_contributors = bigquery_client.get_core_contributors_for_seeds(repo_ids, months=months)
+        df_contributors = bigquery_client.get_core_contributors_for_seeds(repo_ids, days=days)
         if df_contributors.empty:
             logger.warning("在热门项目中未发现贡献者。")
             return
