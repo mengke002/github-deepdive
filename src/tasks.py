@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 async def run_intent_analysis_async():
     """异步执行意图分析任务"""
-    # 获取需要深入分析的项目：Rising Stars 前 5 名和所有 Super Seeds
-    rising = get_rising_stars(limit=5)
+    # 获取需要深入分析的项目：Rising Stars 前 15 名和所有 Super Seeds
+    rising = get_rising_stars(limit=15)
     
     from .database import db_manager
     super_seeds = db_manager.execute_query("SELECT full_name FROM repos WHERE super_seed = 1 LIMIT 10", db_type="source")

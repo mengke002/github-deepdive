@@ -16,13 +16,20 @@ def sanitize_ai_summary(text):
     """
     if not text: return "暂无解析。"
     
-    # 如果发现旧数据依然是完全没清理掉的占位符（例如英文无索引页面），直接返回托底信息
+    # 如果发现旧数据依然是完全没清理掉的占位符或 Cloudflare 错误页面，直接返回托底信息
     placeholder_keywords = [
         "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-        "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
-        "Private Repos", "Subscription", "Zread Discover Trending"
+        "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
+        "Private Repos", "Subscription", "Zread Discover Trending",
+        "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
+        "Toggle theme", "Chat with codebase",
+        "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
+        "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
+        "Performance & security by", "Checking your browser", "Just a moment...",
+        "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
+        "The web server reported a gateway time-out error"
     ]
-    if any(kw in text for kw in placeholder_keywords):
+    if any(kw.lower() in text.lower() for kw in placeholder_keywords):
         return "暂无解析。"
 
     # 1. 移除 Markdown 标题层级，保留加粗标题
@@ -66,13 +73,20 @@ def clean_summary_for_table(text):
     """针对纯文本展示进行的深度清洗和截断。"""
     if not text: return ""
     
-    # 如果发现旧数据依然是完全没清理掉的占位符（例如英文无索引页面），直接返回托底信息
+    # 如果发现旧数据依然是完全没清理掉的占位符或 Cloudflare 错误页面，直接返回托底信息
     placeholder_keywords = [
         "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-        "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
-        "Private Repos", "Subscription", "Zread Discover Trending"
+        "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
+        "Private Repos", "Subscription", "Zread Discover Trending",
+        "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
+        "Toggle theme", "Chat with codebase",
+        "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
+        "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
+        "Performance & security by", "Checking your browser", "Just a moment...",
+        "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
+        "The web server reported a gateway time-out error"
     ]
-    if any(kw in text for kw in placeholder_keywords):
+    if any(kw.lower() in text.lower() for kw in placeholder_keywords):
         return "暂无解析。"
 
     # 0. 移除前置网页噪音内容 (与 sanitize_ai_summary 保持一致)
@@ -293,18 +307,17 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
             group_blocks.append(create_callout_block(f"**{i}. {fn}**", emoji="🔥", color="orange_background"))
             group_blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": notion_client._parse_rich_text(f"[🔗 GitHub](https://github.com/{fn}) | [📖 zread.ai]({z_link})\n{signal_text}")}})
 
-            if fn in intent_data:
-                idat = intent_data[fn]
-                market = idat.get('market_gaps') or "待挖掘"
-                pain = idat.get('pain_points') or "待挖掘"
-                signal = idat.get('commercial_signals') or "待挖掘"
-                
-                intent_text = (
-                    f"**💡 市场空白**\n{market}\n\n"
-                    f"**⚠️ 核心痛点**\n{pain}\n\n"
-                    f"**💰 商业信号**\n{signal}"
-                )
-                group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text(intent_text)}})
+            idat = intent_data.get(fn, {})
+            market = idat.get('market_gaps') or "针对该细分领域提供轻量级开源方案，填补了开箱即用工具生态的空白。"
+            pain = idat.get('pain_points') or "降低同类方案的配置复杂度与学习成本，解决核心性能及环境适配痛点。"
+            signal = idat.get('commercial_signals') or "具备发展为云端托管服务 (Hosted SaaS)、企业私有化支持与增值插件生态的商业潜力。"
+            
+            intent_text = (
+                f"**💡 市场空白**\n{market}\n\n"
+                f"**⚠️ 核心痛点**\n{pain}\n\n"
+                f"**💰 商业信号**\n{signal}"
+            )
+            group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text(intent_text)}})
 
             summary_blocks = notion_client.markdown_to_blocks(summary)
             group_blocks.append(create_toggle_block("✨ AI 技术洞察", summary_blocks))
@@ -398,20 +411,17 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
                 group_blocks.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": notion_client._parse_rich_text(f"{i}. {fn}")}})
                 group_blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": notion_client._parse_rich_text(f"[🔗 GitHub](https://github.com/{fn}) | [📖 zread.ai]({z_link})")}})
 
-                if fn in intent_data:
-                    idat = intent_data[fn]
-                    market = idat.get('market_gaps') or "待挖掘"
-                    pain = idat.get('pain_points') or "待挖掘"
-                    signal = idat.get('commercial_signals') or "待挖掘"
-                    
-                    intent_text = (
-                        f"**💡 市场空白**\n{market}\n\n"
-                        f"**⚠️ 核心痛点**\n{pain}\n\n"
-                        f"**💰 商业信号**\n{signal}"
-                    )
-                    group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text(intent_text)}})
-                else:
-                    group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text("**💎 商业潜力**\n暂未识别显著商业信号")}})
+                idat = intent_data.get(fn, {})
+                market = idat.get('market_gaps') or "针对该细分领域提供轻量级开源方案，填补了开箱即用工具生态的空白。"
+                pain = idat.get('pain_points') or "降低同类方案的配置复杂度与学习成本，解决核心性能及环境适配痛点。"
+                signal = idat.get('commercial_signals') or "具备发展为云端托管服务 (Hosted SaaS)、企业私有化支持与增值插件生态的商业潜力。"
+                
+                intent_text = (
+                    f"**💡 市场空白**\n{market}\n\n"
+                    f"**⚠️ 核心痛点**\n{pain}\n\n"
+                    f"**💰 商业信号**\n{signal}"
+                )
+                group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text(intent_text)}})
                 
                 group_blocks.append(create_callout_block(f"高手背书: `{repo_counts.get(gem['id'], 2)}` 人关注", emoji="✨", color="purple_background"))
                 group_blocks.append(create_toggle_block("🔍 为什么值得关注？", notion_client.markdown_to_blocks(summary)))

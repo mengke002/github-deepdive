@@ -35,16 +35,24 @@ class RepoAnalyzer:
         # 识别需要升级的项目：
         # 1. 包含托底标记 [自动托底]
         # 2. 长度过短（<120字）
-        # 3. 包含 zread 占位符特征的内容
+        # 3. 包含 zread 占位符或 Cloudflare 错误特征的内容
         needs_upgrade = []
         placeholder_keywords = [
             "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-            "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
-            "Private Repos", "Subscription", "Zread Discover Trending"
+            "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
+            "Private Repos", "Subscription", "Zread Discover Trending",
+            "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
+            "Toggle theme", "Chat with codebase", "登录以获取更多信息", "请登录后查看",
+            # Cloudflare 错误与网关超时 (504/524/502) 拦截特征
+            "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
+            "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
+            "Performance & security by", "Checking your browser", "Just a moment...",
+            "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
+            "The web server reported a gateway time-out error"
         ]
         
         for name, summary in cache_map.items():
-            is_placeholder = any(kw in summary for kw in placeholder_keywords)
+            is_placeholder = any(kw.lower() in summary.lower() for kw in placeholder_keywords)
             if "[自动托底]" in summary or len(summary) < 120 or is_placeholder:
                 needs_upgrade.append(name)
         
@@ -78,14 +86,22 @@ class RepoAnalyzer:
                     if result.success and result.markdown:
                         content = result.markdown
                         
-                        # 核心改进：检测是否为 zread 的“未索引”占位页面
+                        # 核心改进：检测是否为 zread 的“未索引”占位页面或 Cloudflare 拦截/超时错误页面
                         placeholder_keywords = [
                             "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-                            "Ask anything about the Repository", "Responsed by AI", "May contain mistakes",
-                            "Private Repos", "Subscription", "Zread Discover Trending"
+                            "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
+                            "Private Repos", "Subscription", "Zread Discover Trending",
+                            "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
+                            "Toggle theme", "Chat with codebase", "登录以获取更多信息", "请登录后查看",
+                            # Cloudflare 错误与网关超时 (504/524/502) 拦截特征
+                            "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
+                            "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
+                            "Performance & security by", "Checking your browser", "Just a moment...",
+                            "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
+                            "The web server reported a gateway time-out error"
                         ]
-                        if any(kw in content for kw in placeholder_keywords):
-                            logger.info(f"检测到 zread 占位页面，跳过: {url}")
+                        if any(kw.lower() in content.lower() for kw in placeholder_keywords):
+                            logger.info(f"检测到 zread 占位或 Cloudflare 拦截页面，跳过并触发 LLM 兜底: {url}")
                             continue 
                         
                         # 1. 尝试精细提取“概述”或“快速入门”部分
@@ -114,8 +130,8 @@ class RepoAnalyzer:
                         
                         # 3. 最终校验
                         final_text = cleaned.strip()
-                        # 再次检查清洗后的文本是否还包含占位符特征
-                        if len(final_text) > 150 and not any(kw in final_text for kw in placeholder_keywords):
+                        # 再次检查清洗后的文本是否还包含占位符或 Cloudflare 特征
+                        if len(final_text) > 150 and not any(kw.lower() in final_text.lower() for kw in placeholder_keywords):
                             return final_text[:5000]
                 except Exception as e:
                     logger.warning(f"无法抓取 {url}: {e}")
