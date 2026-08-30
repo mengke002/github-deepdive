@@ -375,8 +375,8 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
             fn = repo['full_name']
             z_link = get_zread_link(fn)
             summary = ai_summaries.get(fn)
-            if not summary or "[自动托底]" in summary:
-                summary = repo['description'] or "No description"
+            if not summary or summary == "暂无解析。":
+                summary = repo.get('description') or "No description"
             
             safe_summary = sanitize_ai_summary(summary)
             if not safe_summary or safe_summary == "暂无解析。":

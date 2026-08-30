@@ -3,6 +3,7 @@ import json
 import asyncio
 import re
 import html
+from datetime import datetime, timedelta
 from .github_client import github_client
 from .database import db_manager
 from .config import load_config
@@ -385,13 +386,29 @@ class IntentDetector:
             data.get("commercial_signals"), json.dumps(data, ensure_ascii=False)
         )], db_type="insight")
 
-    def get_cached_analysis(self, full_name):
-        """获取已缓存的分析"""
+    def get_cached_analysis(self, full_name, max_age_days=14):
+        """获取已缓存的分析，支持时间衰减与过期更新（默认 14 天重新研判最新动态）"""
         res = db_manager.execute_query(
-            f"SELECT market_gaps, pain_points, commercial_signals FROM intent_analyses WHERE repo_full_name = '{full_name}'",
+            f"SELECT market_gaps, pain_points, commercial_signals, updated_at FROM intent_analyses WHERE repo_full_name = '{full_name}'",
             db_type="insight"
         )
-        return res[0] if res else None
+        if not res:
+            return None
+        
+        row = res[0]
+        # 如果缓存时间超过 max_age_days 天，视为过期，重新获取最新 Issue 和代码演进研判
+        if max_age_days and row.get('updated_at'):
+            try:
+                updated_time = row['updated_at']
+                if isinstance(updated_time, str):
+                    updated_time = datetime.strptime(updated_time, "%Y-%m-%d %H:%M:%S")
+                if datetime.now() - updated_time > timedelta(days=max_age_days):
+                    logger.info(f"项目 {full_name} 的意图分析缓存已超过 {max_age_days} 天，将重新获取最新上下文研判。")
+                    return None
+            except Exception as e:
+                logger.warning(f"解析缓存时间出错: {e}")
+                
+        return row
 
 intent_detector = IntentDetector()
 

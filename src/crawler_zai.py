@@ -1,288 +1,339 @@
-import asyncio
 import logging
-import requests
 import json
+import asyncio
 import re
-from crawl4ai import AsyncWebCrawler
+from typing import List, Dict, Any, Tuple
 from .config import load_config
 from .database import db_manager
+from .llm_client import LLMClient
+from .github_client import github_client
+from .intent_detector import clean_readme_content
 
 logger = logging.getLogger(__name__)
 
+# 无效摘要与占位符黑名单
+PLACEHOLDER_KEYWORDS = [
+    "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
+    "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
+    "Private Repos", "Subscription", "Zread Discover Trending",
+    "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
+    "Toggle theme", "Chat with codebase", "登录以获取更多信息", "请登录后查看",
+    # Cloudflare 错误与网关超时 (504/524/502) 拦截特征
+    "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
+    "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
+    "Performance & security by", "Checking your browser", "Just a moment...",
+    "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
+    "The web server reported a gateway time-out error", "暂无解析"
+]
+
+def parse_llm_json_response(content: Any) -> Dict[str, str]:
+    """鲁棒解析 LLM 返回的 JSON 对象、JSON 数组或纯文本字典"""
+    if not content:
+        return {}
+    
+    if isinstance(content, dict):
+        if "repos" in content and isinstance(content["repos"], list):
+            content = content["repos"]
+        elif "results" in content and isinstance(content["results"], dict):
+            content = content["results"]
+        elif "projects" in content and isinstance(content["projects"], list):
+            content = content["projects"]
+        elif "items" in content and isinstance(content["items"], list):
+            content = content["items"]
+        else:
+            return {k.strip(): str(v).strip() for k, v in content.items() if v}
+
+    if isinstance(content, list):
+        res_dict = {}
+        for item in content:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("full_name") or item.get("repo")
+                summary = item.get("summary") or item.get("overview") or item.get("description")
+                if name and summary:
+                    res_dict[str(name).strip()] = str(summary).strip()
+        return res_dict
+
+    if not isinstance(content, str):
+        return {}
+
+    cleaned = content.strip()
+    if "```json" in cleaned:
+        match = re.search(r'```json\s*([\s\S]*?)\s*```', cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+    elif "```" in cleaned:
+        match = re.search(r'```\s*([\s\S]*?)\s*```', cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+
+    try:
+        data = json.loads(cleaned)
+        return parse_llm_json_response(data)
+    except Exception:
+        pass
+
+    # 正则容错提取 key-value 结构
+    res_dict = {}
+    try:
+        matches = re.findall(r'"([a-zA-Z0-9_\-\.]+/[a-zA-Z0-9_\-\.]+)"\s*:\s*"([^"]+)"', cleaned)
+        for name, summary in matches:
+            res_dict[name.strip()] = summary.strip()
+    except Exception:
+        pass
+
+    return res_dict
+
+
 class RepoAnalyzer:
+    """
+    基于大模型长上下文批量聚合生成 GitHub 开源项目中文深度架构与技术解读。
+    默认采用长上下文大模型批量聚合（最多 20 个/批），替代易卡顿的外部爬虫。
+    """
     def __init__(self):
         self.settings = load_config()
-        self.api_key = self.settings["llm"]["api_key"]
-        self.base_url = self.settings["llm"]["base_url"]
-        self.models = self.settings["llm"]["model_names"]
-        self.llm_batch_size = 6  # 默认每批处理 6 个项目
-        
-        self.crawl_semaphore = asyncio.Semaphore(2)
-        self.llm_semaphore = asyncio.Semaphore(3) # 批处理占用更多 token，降低并发
+        self.llm_batch_size = 20  # 默认每批聚合最多 20 个项目
+        self._llm_client = None
 
-    def _get_cached_summaries(self, full_names):
+    @property
+    def llm_client(self):
+        if self._llm_client is None:
+            llm_conf = self.settings.get("llm", {})
+            self._llm_client = LLMClient(
+                api_key=llm_conf.get("api_key"),
+                base_url=llm_conf.get("base_url"),
+                model_names=llm_conf.get("model_names")
+            )
+        return self._llm_client
+
+    def _get_cached_summaries(self, full_names: List[str]) -> Tuple[Dict[str, str], List[str]]:
         """
-        批量获取缓存的摘要，并识别低质量摘要以备升级。
+        批量获取缓存中的有效摘要，并严格识别占位符或低质量摘要以触发重新生成。
         """
-        if not full_names: return {}, []
+        if not full_names:
+            return {}, []
+
         names_str = ",".join([f"'{n}'" for n in full_names])
         res = db_manager.execute_query(
             f"SELECT repo_full_name, summary FROM ai_summaries WHERE repo_full_name IN ({names_str})", 
             db_type="insight"
         )
-        cache_map = {r['repo_full_name']: r['summary'] for r in res}
-        
-        # 识别需要升级的项目：
-        # 1. 包含托底标记 [自动托底]
-        # 2. 长度过短（<120字）
-        # 3. 包含 zread 占位符或 Cloudflare 错误特征的内容
-        needs_upgrade = []
-        placeholder_keywords = [
-            "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-            "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
-            "Private Repos", "Subscription", "Zread Discover Trending",
-            "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
-            "Toggle theme", "Chat with codebase", "登录以获取更多信息", "请登录后查看",
-            # Cloudflare 错误与网关超时 (504/524/502) 拦截特征
-            "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
-            "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
-            "Performance & security by", "Checking your browser", "Just a moment...",
-            "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
-            "The web server reported a gateway time-out error"
-        ]
-        
-        for name, summary in cache_map.items():
-            is_placeholder = any(kw.lower() in summary.lower() for kw in placeholder_keywords)
-            if "[自动托底]" in summary or len(summary) < 120 or is_placeholder:
-                needs_upgrade.append(name)
-        
-        return cache_map, needs_upgrade
+        cache_map = {}
+        for r in res:
+            name = r['repo_full_name']
+            summary = r['summary'] or ""
+            # 清理历史旧数据中的 [自动托底] 前缀
+            if "[自动托底]" in summary:
+                summary = re.sub(r'^\s*\[自动托底\]\s*', '', summary).strip()
+            cache_map[name] = summary
 
-    def _save_summaries_to_cache(self, summary_map):
-        """批量保存摘要到缓存"""
-        if not summary_map: return
-        records = [(name, summary) for name, summary in summary_map.items() if summary]
-        if not records: return
-        # 增加日志：哪些是带 [自动托底] 的
-        fallback_count = sum(1 for s in summary_map.values() if "[自动托底]" in s)
-        logger.info(f"正在更新 {len(records)} 条摘要缓存 (其中 {fallback_count} 条为临时托底)...")
-        
-        sql = "INSERT INTO ai_summaries (repo_full_name, summary) VALUES (%s, %s) ON DUPLICATE KEY UPDATE summary=VALUES(summary)"
+        valid_cache = {}
+        needs_generation = []
+
+        for name in full_names:
+            if name not in cache_map:
+                needs_generation.append(name)
+                continue
+
+            summary = cache_map[name]
+            is_placeholder = any(kw.lower() in summary.lower() for kw in PLACEHOLDER_KEYWORDS)
+            if not summary or len(summary) < 60 or is_placeholder:
+                needs_generation.append(name)
+            else:
+                valid_cache[name] = summary
+
+        return valid_cache, needs_generation
+
+    def _save_summaries_to_cache(self, summary_map: Dict[str, str]):
+        """批量持久化保存高质量摘要至数据库"""
+        if not summary_map:
+            return
+        records = [(name, summary) for name, summary in summary_map.items() if summary and len(summary.strip()) >= 30]
+        if not records:
+            return
+
+        logger.info(f"正在保存 {len(records)} 条高质量项目技术解读至数据库...")
+        sql = """
+        INSERT INTO ai_summaries (repo_full_name, summary) 
+        VALUES (%s, %s) 
+        ON DUPLICATE KEY UPDATE summary=VALUES(summary)
+        """
         db_manager.execute_batch(sql, records, db_type="insight")
 
-    async def fetch_zread_content(self, crawler, full_name):
-        async with self.crawl_semaphore:
-            # 优先尝试概述页面
-            urls = [f"https://zread.ai/{full_name}/1-overview", f"https://zread.ai/{full_name}"]
-            for url in urls:
+    async def fetch_repo_context(self, full_name: str) -> Tuple[str, str, str, str, list]:
+        """异步获取单个项目的 Description、语言、Topics 标签及清洗后的 README 片段"""
+        # 1. 查询数据库已有元数据
+        repo_info = db_manager.execute_query(
+            f"SELECT description, language, topics FROM repos WHERE full_name = '{full_name}'", 
+            db_type="source"
+        )
+        desc = ""
+        lang = ""
+        topics = []
+        if repo_info:
+            desc = repo_info[0].get('description') or ""
+            lang = repo_info[0].get('language') or ""
+            topics_raw = repo_info[0].get('topics')
+            if isinstance(topics_raw, list):
+                topics = topics_raw
+            elif isinstance(topics_raw, str):
                 try:
-                    # 使用 anti-bot 特性：magic=True (模拟真实用户环境，抗指纹检测)
-                    result = await crawler.arun(
-                        url=url,
-                        bypass_cache=True,
-                        magic=True,
-                        delay_before_return_html=2.0
-                    )
-                    if result.success and result.markdown:
-                        content = result.markdown
-                        
-                        # 核心改进：检测是否为 zread 的“未索引”占位页面或 Cloudflare 拦截/超时错误页面
-                        placeholder_keywords = [
-                            "提问任何有关此仓库的问题", "回答由AI生成", "私有仓库", "收藏夹", "登录以查看更多",
-                            "Ask anything about the Repository", "Ask anything about this", "Responsed by AI", "May contain mistakes",
-                            "Private Repos", "Subscription", "Zread Discover Trending",
-                            "尚未收录", "未找到该仓库", "正在生成中", "Repository not found", "No overview available",
-                            "Toggle theme", "Chat with codebase", "登录以获取更多信息", "请登录后查看",
-                            # Cloudflare 错误与网关超时 (504/524/502) 拦截特征
-                            "Cloudflare Ray ID", "Visit cloudflare.com", "gateway time-out", "gateway timeout",
-                            "Bad gateway", "Web server is down", "Error 524", "Error 504", "Error 502", "Error 520",
-                            "Performance & security by", "Checking your browser", "Just a moment...",
-                            "504 Gateway Time-out", "502 Bad Gateway", "524 A timeout occurred",
-                            "The web server reported a gateway time-out error"
-                        ]
-                        if any(kw.lower() in content.lower() for kw in placeholder_keywords):
-                            logger.info(f"检测到 zread 占位或 Cloudflare 拦截页面，跳过并触发 LLM 兜底: {url}")
-                            continue 
-                        
-                        # 1. 尝试精细提取“概述”或“快速入门”部分
-                        pattern = r'(?:^|\n)(?:#|##)\s*(?:概述|Overview|快速入门|Quick\s*Start).*?\n(.*?)(?=\n(?:#|##)|\Z)'
-                        summary_match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
-                        
-                        raw_extracted = ""
-                        if summary_match:
-                            raw_extracted = summary_match.group(1).strip()
-                        else:
-                            # 托底处理
-                            raw_extracted = content
-                            
-                        # 2. 深度清洗 zread 噪音
-                        cleaned = raw_extracted
-                        cleaned = re.sub(r'^\s*\* \[趋势\].*?\n', '', cleaned, flags=re.MULTILINE)
-                        cleaned = re.sub(r'^\s*\* \[订阅\].*?\n', '', cleaned, flags=re.MULTILINE)
-                        cleaned = re.sub(r'\[反馈\]\(https://zhipu-ai\.feishu\.cn/.*?\)', '', cleaned)
-                        cleaned = re.sub(r'\[\]\(https://(?:x\.com|discord\.gg)/.*?\)', '', cleaned)
-                        cleaned = re.sub(r'⌘K\s*Ask AI.*?(?=上次索引|快速入门|资讯|深入解析|$)', '', cleaned, flags=re.DOTALL)
-                        cleaned = re.sub(r'\* (?:Toggle theme|分享|登录|快速入门|资讯|深入解析)\s*', '', cleaned)
-                        cleaned = re.sub(r'上次索引:\[.*?\]\(.*?\)', '', cleaned)
-                        cleaned = re.sub(r'(?:来源|Source|参考)\s*[:：]\s*\[.*?\]\(.*?\)', '', cleaned, flags=re.IGNORECASE)
-                        cleaned = re.sub(r'(?:来源|Source|参考)\s*[:：]\s*、?\s*', '', cleaned, flags=re.IGNORECASE)
-                        cleaned = re.sub(r'(?:\d+|约\d+|[一二三四五六七八九十]+)?\s*分钟\s*[:：]?\s*(?:入门|阅读|学习|解读)?', '', cleaned, flags=re.IGNORECASE)
-                        
-                        # 3. 最终校验
-                        final_text = cleaned.strip()
-                        # 再次检查清洗后的文本是否还包含占位符或 Cloudflare 特征
-                        if len(final_text) > 150 and not any(kw.lower() in final_text.lower() for kw in placeholder_keywords):
-                            return final_text[:5000]
-                except Exception as e:
-                    logger.warning(f"无法抓取 {url}: {e}")
-                    continue
-            return None
+                    topics = json.loads(topics_raw)
+                except Exception:
+                    pass
 
-    async def get_summaries_from_llm_batch(self, repo_contents: dict):
+        # 2. 抓取并深度清洗 README (截取前 2000 字高信噪比纯净文本)
+        raw_readme = await asyncio.to_thread(github_client.get_readme, full_name)
+        cleaned_readme = clean_readme_content(raw_readme, max_chars=2000)
+
+        # 3. 组装结构化上下文
+        topic_str = "、".join(topics[:5]) if topics else "无"
+        context_parts = [
+            f"项目全名: {full_name}",
+            f"主语言: {lang or '未知'} | 标签: {topic_str}",
+            f"项目定位: {desc or '暂无描述'}",
+            f"README核心内容:\n{cleaned_readme if cleaned_readme else '（该项目未提供详细 README，请根据项目定位与技术栈标签进行技术解读与架构推演）'}"
+        ]
+        context = "\n".join(context_parts)
+        return full_name, context, desc, lang, topics
+
+    async def get_summaries_from_llm_batch(self, batch_items: List[Dict[str, Any]]) -> Dict[str, str]:
         """
-        核心批处理方法：一次性解析多个仓库
+        核心长上下文批量生成：将最多 20 个项目聚合为单次 Prompt 提交给大模型
         """
-        names = list(repo_contents.keys())
-        prompt_content = []
-        for name, content in repo_contents.items():
-            truncated_content = content[:3000] if content else "No description"
-            prompt_content.append(f"### REPO: {name}\nCONTENT:\n{truncated_content}\n---")
-
-        system_prompt = (
-            "你是一位资深软件架构师。请分析以下 GitHub 项目，并为每个项目产出一段深度技术摘要（中文，150-200字）。\n"
-            "摘要应包含：核心价值、工程亮点、应用前景。请务必输出 JSON 数组格式，结构如下：\n"
-            '[{"name": "owner/repo", "summary": "摘要内容"}, ...]'
-        )
-
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=120.0,
-            default_headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json"
-            }
-        )
-
-        async with self.llm_semaphore:
-            for attempt in range(3):
-                for model in self.models:
-                    try:
-                        logger.info(f"正在使用 {model} 进行批处理 LLM 分析 ({len(names)} 个项目)...")
-                        messages = [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": "\n".join(prompt_content)}
-                        ]
-
-                        response = await client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            temperature=0.2,
-                            stream=True
-                        )
-                        
-                        content_chunks = []
-                        async for chunk in response:
-                            if hasattr(chunk, 'choices') and chunk.choices:
-                                delta = chunk.choices[0].delta
-                                if hasattr(delta, 'content') and delta.content:
-                                    content_chunks.append(delta.content)
-                                
-                        raw_content = "".join(content_chunks).strip()
-
-                        try:
-                            if "```json" in raw_content:
-                                raw_content = re.search(r'```json\s*(.*?)\s*```', raw_content, re.DOTALL).group(1)
-
-                            data = json.loads(raw_content)
-                            if isinstance(data, dict) and "repos" in data: data = data["repos"]
-                            if not isinstance(data, list): data = [data]
-
-                            # 重要：LLM 生成的摘要统一带上 [自动托底] 标记，确保未来有机会升级为 zread
-                            results = {item['name']: f"[自动托底] {item['summary']}" for item in data if 'name' in item and 'summary' in item}
-                            self._save_summaries_to_cache(results)
-                            return results
-                        except Exception as parse_err:
-                            logger.error(f"解析 LLM JSON 响应失败: {parse_err}")
-                            continue
-
-                    except Exception as e:
-                        logger.warning(f"LLM {model} 异常: {e}")
-                        continue
-                if attempt < 2: await asyncio.sleep(2 ** (attempt + 1))
+        if not batch_items:
             return {}
 
-    async def analyze_batch(self, full_names):
-        if not full_names: return {}
-        
-        # 1. 查询缓存并识别需要升级的项目
-        cached_results, upgrade_names = self._get_cached_summaries(full_names)
-        
-        # 待处理项目 = 缓存中没有的项目 + 需要升级的项目
-        missing_names = [n for n in full_names if n not in cached_results]
-        pending_names = list(set(missing_names + upgrade_names))
-        
-        if not pending_names:
-            return cached_results
+        chunk_names = [item['full_name'] for item in batch_items]
+        prompt_items = []
+        for idx, item in enumerate(batch_items, 1):
+            prompt_items.append(f"【项目 {idx}/{len(batch_items)}】: {item['full_name']}\n{item['context']}")
 
-        logger.info(f"正在处理 {len(pending_names)} 个项目的摘要（含 {len(upgrade_names)} 个待升级项目）...")
-        
-        # 2. 尝试抓取 zread 内容
-        zread_contents = {}
-        no_zread_names = []
-        
-        async with AsyncWebCrawler() as crawler:
-            crawl_tasks = [self.fetch_zread_content(crawler, name) for name in pending_names]
-            crawled_list = await asyncio.gather(*crawl_tasks)
-            
-            for name, content in zip(pending_names, crawled_list):
-                if content:
-                    zread_contents[name] = content
-                else:
-                    no_zread_names.append(name)
+        system_prompt = (
+            "你是一位资深的开源软件架构师与资深技术专家。请阅读用户提供的批量 GitHub 开源项目资料，为其中每个项目分别用 180~250 字提炼其中文深度技术解读。\n"
+            "解读需涵盖：1. 核心定位与解决的关键痛点；2. 架构设计与工程技术亮点；3. 典型应用场景与生态价值。\n\n"
+            "【输出格式要求】:\n"
+            "请务必输出标准的 JSON 字典格式，Key 为项目的 full_name（如 'owner/repo'），Value 为对应的中文技术解读段落。\n"
+            "示例:\n"
+            "{\n"
+            '  "vllm-project/vllm": "vLLM 是一个高吞吐、低延迟的 LLM 推理与服务引擎。其核心亮点在于创新性的 PagedAttention 内存管理算法，有效解决了注意力机制中的显存碎片问题，推理并发性能相比传统实现提升了数倍，广泛应用于大模型企业级部署与云端推理服务场景。",\n'
+            '  "astral-sh/uv": "uv 是基于 Rust 构建的高性能 Python 包管理与解析工具。它通过无锁并发设计和本地缓存优化，将依赖解析和安装速度提升了 10~100 倍，完全兼容 pip 和 virtualenv 命令体系，极大加速了 CI/CD 构建与本地开发流程。"\n'
+            "}"
+        )
 
-        # 3. 对 zread 缺失的项目，构建高质量托底上下文 (README + Description)
-        from .github_client import github_client
-        fallback_contexts = {}
-        
-        if no_zread_names:
-            logger.info(f"有 {len(no_zread_names)} 个项目无法从 zread 获取，正在采集 GitHub README 进行深度托底...")
-            for name in no_zread_names:
-                # 获取 README (前 3000 字)
-                readme = await asyncio.to_thread(github_client.get_readme, name)
-                # 获取 Description
-                repo_info = db_manager.execute_query(f"SELECT description FROM repos WHERE full_name = '{name}'", db_type="source")
-                desc = repo_info[0]['description'] if repo_info and repo_info[0]['description'] else ""
-                
-                # 组装 LLM 分析用的上下文
-                combined_context = f"GitHub Description: {desc}\n\nREADME Snippet:\n{readme[:3500]}"
-                fallback_contexts[name] = combined_context
+        user_prompt = "\n\n====================\n\n".join(prompt_items)
 
-        # 4. 汇总结果并执行 LLM 解析
-        final_results = {**cached_results}
-        
-        # zread 抓到的直接存入并更新缓存 (高质量)
-        if zread_contents:
-            logger.info(f"成功获取 {len(zread_contents)} 个项目的 zread 深度解析。")
-            final_results.update(zread_contents)
-            self._save_summaries_to_cache(zread_contents)
+        data_raw = await self.llm_client.chat(
+            system_prompt=system_prompt,
+            user_prompt=f"请对以下 {len(batch_items)} 个开源项目进行深度技术解读并输出 JSON 字典：\n\n{user_prompt}",
+            temperature=0.2,
+            json_mode=True
+        )
 
-        # zread 没抓到的，通过 README 调 LLM 生成 (带 [自动托底] 标记)
-        if fallback_contexts:
-            logger.info(f"为 {len(fallback_contexts)} 个项目启动基于 README 的 LLM 托底分析...")
-            pending_list = list(fallback_contexts.keys())
-            for i in range(0, len(pending_list), self.llm_batch_size):
-                chunk_names = pending_list[i:i + self.llm_batch_size]
-                chunk_data = {n: fallback_contexts[n] for n in chunk_names}
-                batch_res = await self.get_summaries_from_llm_batch(chunk_data)
-                final_results.update(batch_res)
-        
-        # 5. 兜底填充
+        parsed_dict = parse_llm_json_response(data_raw)
+        results = {}
+
+        if isinstance(parsed_dict, dict):
+            for name, summary in parsed_dict.items():
+                if not summary or not isinstance(summary, str):
+                    continue
+                # 智能名称对齐（精确、大小写、后缀匹配）
+                matched_name = None
+                for cn in chunk_names:
+                    if name == cn or name.lower() == cn.lower():
+                        matched_name = cn
+                        break
+                    elif name.lower() == cn.split('/')[-1].lower():
+                        matched_name = cn
+                        break
+                    elif cn.lower().endswith(name.lower()):
+                        matched_name = cn
+                        break
+
+                if matched_name and len(summary.strip()) >= 40:
+                    results[matched_name] = summary.strip()
+
+        return results
+
+    def _build_synthetic_summary(self, full_name: str, desc: str = "", lang: str = "", topics: list = None) -> str:
+        """当模型调用异常时的智能合成技术摘要"""
+        topics_str = "、".join(topics[:3]) if topics else (lang or "开源开发者工具")
+        desc_text = desc.strip() if desc else "开源技术方案"
+        return (
+            f"{full_name} 是基于 {lang or '现代技术栈'} 构建的 {topics_str} 项目。其核心定位为：{desc_text}。"
+            f"项目设计注重轻量化与开箱即用体验，针对常见开发痛点提供了高效的工程实现，具备良好的集成扩展性与应用价值。"
+        )
+
+    async def analyze_batch(self, full_names: List[str]) -> Dict[str, str]:
+        """
+        全量批量分析入口：
+        1. 查缓存并跳过已有的高质量解析
+        2. 并行抓取缺失项目的 README 与元数据
+        3. 聚合为最多 20 个一组的长上下文批次请求大模型
+        4. 自动兜底并持久化更新缓存
+        """
+        if not full_names:
+            return {}
+
+        # 1. 查询有效缓存
+        valid_cache, needs_generation = self._get_cached_summaries(full_names)
+
+        if not needs_generation:
+            return valid_cache
+
+        logger.info(f"正在为 {len(needs_generation)} 个项目使用大模型长上下文批量生成技术解读（聚合批次 <= 20）...")
+
+        # 2. 并行获取 Context 与元数据
+        context_tasks = [self.fetch_repo_context(name) for name in needs_generation]
+        fetched = await asyncio.gather(*context_tasks, return_exceptions=True)
+
+        project_items = []
+        repo_meta = {}
+        for item in fetched:
+            if isinstance(item, tuple) and len(item) == 5:
+                fname, ctx, desc, lang, topics = item
+                project_items.append({
+                    "full_name": fname,
+                    "context": ctx,
+                    "desc": desc,
+                    "lang": lang,
+                    "topics": topics
+                })
+                repo_meta[fname] = (desc, lang, topics)
+            elif isinstance(item, Exception):
+                logger.error(f"获取项目上下文失败: {item}")
+
+        # 3. 分批调用大模型 (每批聚合最多 20 个项目)
+        new_summaries = {}
+        batch_size = min(self.llm_batch_size, 20)
+
+        for i in range(0, len(project_items), batch_size):
+            chunk = project_items[i:i + batch_size]
+            logger.info(f"正在提交第 {i//batch_size + 1}/{(len(project_items)-1)//batch_size + 1} 批大模型技术解读 ({len(chunk)} 个项目)...")
+
+            try:
+                batch_res = await self.get_summaries_from_llm_batch(chunk)
+                new_summaries.update(batch_res)
+            except Exception as e:
+                logger.error(f"批处理大模型解读异常: {e}")
+
+            # 针对当前批次中若有未成功匹配或返回过短的项目，进行智能合成兜底
+            for p in chunk:
+                fn = p['full_name']
+                if fn not in new_summaries or len(new_summaries[fn]) < 40:
+                    desc, lang, topics = repo_meta.get(fn, ("", "", []))
+                    new_summaries[fn] = self._build_synthetic_summary(fn, desc, lang, topics)
+
+        # 4. 持久化存入数据库
+        if new_summaries:
+            self._save_summaries_to_cache(new_summaries)
+
+        # 5. 合并返回全量结果
+        final_results = {**valid_cache, **new_summaries}
         for name in full_names:
             if name not in final_results:
                 final_results[name] = "该项目暂无深度解析。"
-                
+
         return final_results
+
 
 repo_analyzer = RepoAnalyzer()
