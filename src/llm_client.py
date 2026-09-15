@@ -16,6 +16,7 @@ class LLMClient:
         self.base_url = base_url.rstrip('/')
         self.model_names = model_names
         self.timeout = 90.0
+        self.last_used_model: Optional[str] = None
         self.client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -32,16 +33,18 @@ class LLMClient:
         user_prompt: str, 
         temperature: float = 0.3,
         json_mode: bool = False,
-        max_retries: int = 1
+        max_retries: int = 1,
+        return_model: bool = False
     ) -> Optional[Any]:
         """
         发送聊天请求，支持模型轮询。
         
         :param json_mode: 如果为 True，将尝试解析返回结果为 JSON。
+        :param return_model: 如果为 True，返回元组 (result, used_model)。
         """
         if not self.api_key or not self.model_names:
             logger.error("LLM 配置缺失: api_key 或 model_names 为空")
-            return None
+            return (None, None) if return_model else None
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -68,10 +71,12 @@ class LLMClient:
                                 content_chunks.append(delta.content)
 
                     content = "".join(content_chunks).strip()
+                    self.last_used_model = model
                         
-                    if json_mode:
-                        return self._parse_json(content)
-                    return content
+                    res = self._parse_json(content) if json_mode else content
+                    if return_model:
+                        return res, model
+                    return res
                         
                 except Exception as e:
                     error_msg = str(e)
@@ -92,7 +97,7 @@ class LLMClient:
                             continue
                         break # 切换下一个模型
             
-        return None
+        return (None, None) if return_model else None
 
     def _parse_json(self, text: str) -> Any:
         """

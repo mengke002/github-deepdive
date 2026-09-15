@@ -1,4 +1,5 @@
 import logging
+import os
 import asyncio
 import re
 import json
@@ -144,10 +145,32 @@ def create_toggle_block(title, children_blocks):
         }
     }
 
+def write_github_step_summary(title: str, model_name: str, report_type: str = "daily"):
+    """
+    仅在 GitHub Actions 中记录脱敏的任务状态与模型元信息，
+    绝不输出具体技术与商业洞察正文，确保敏感商业情报私密性。
+    """
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    try:
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        md = (
+            f"## {title}\n"
+            f"- ⏰ **任务完成时间**: {now_str} (CST)\n"
+            f"- 🤖 **总结分析模型**: `{model_name}`\n"
+            f"- 🔒 **隐私保护**: 完整研判内容已私密推送到专属 Notion，不在公开 CI/CD 日志中展示。\n"
+        )
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write(md + "\n\n")
+        logger.info(f"已写入 GitHub Actions 运行状态摘要 (模型: {model_name})")
+    except Exception as e:
+        logger.warning(f"写入 GITHUB_STEP_SUMMARY 失败: {e}")
+
 from .llm_client import LLMClient
 from .user_analyzer import user_analyzer
 
-async def generate_global_insight(rising_stars, hidden_gems, user_bursts):
+async def generate_global_insight(rising_stars, hidden_gems, user_bursts, return_model: bool = False):
     """
     使用独立的 report_llm 模型列表生成每日综合洞察。
     增加对 User 异动的关注。
@@ -155,7 +178,11 @@ async def generate_global_insight(rising_stars, hidden_gems, user_bursts):
     settings = load_config()
     conf = settings.get("report_llm", {})
     if not conf.get("api_key") or not conf.get("model_names"):
-        return "今日暂无全局洞察总结。"
+        conf = settings.get("llm", {})
+
+    if not conf.get("api_key") or not conf.get("model_names"):
+        msg = "今日暂无全局洞察总结。"
+        return (msg, "无配置模型") if return_model else msg
 
     llm_client = LLMClient(
         api_key=conf.get("api_key"),
@@ -180,13 +207,21 @@ async def generate_global_insight(rising_stars, hidden_gems, user_bursts):
         "你的目标是：识别今日最值得关注的技术范式迁移、可能的商业机会或开发者社区的集体意图转变以及其他洞察，结构清晰，排版优美。"
     )
 
-    insight = await llm_client.chat(
+    insight, used_model = await llm_client.chat(
         system_prompt=system_prompt,
         user_prompt=context,
-        temperature=0.5
+        temperature=0.5,
+        return_model=True
     )
 
-    return insight or "今日技术动态活跃，建议重点关注上述黑马项目的技术选型。"
+    final_insight = insight or "今日技术动态活跃，建议重点关注上述黑马项目的技术选型。"
+    model_name = used_model or (conf.get("model_names", ["未知模型"])[0] if conf.get("model_names") else "未知模型")
+    if not insight:
+        model_name = f"{model_name} (调用失败，使用托底文本)"
+
+    if return_model:
+        return final_insight, model_name
+    return final_insight
 
 def get_zread_link(full_name):
     """生成 zread.ai 的深度讲解链接。"""
@@ -224,7 +259,10 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
     )
 
     # 2. 生成全局洞察 (使用独立模型)
-    global_insight = await generate_global_insight(rising_stars, hidden_gems, user_bursts)
+    global_insight, insight_model = await generate_global_insight(
+        rising_stars, hidden_gems, user_bursts, return_model=True
+    )
+    logger.info(f"每日全局洞察生成完成，使用模型: {insight_model}")
 
     gem_ids = [str(g['id']) for g in hidden_gems]
     counts_res = db_manager.execute_query(
@@ -257,27 +295,41 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
     # 插入全局洞察 (解析 Markdown 为子 Block 以保持排版)
     insight_blocks = notion_client.markdown_to_blocks(global_insight)
     if insight_blocks:
-        # 使用第一行作为 Callout 的标题，其余作为子 Block
         first_block = insight_blocks[0]
         title_text = "今日github洞察"
-        insight_children = insight_blocks
+        insight_children = list(insight_blocks)
         
         # 尝试从第一块提取标题
         if first_block["type"] == "paragraph":
             rich_text = first_block["paragraph"]["rich_text"]
             if rich_text and len(rich_text[0]["text"]["content"]) < 100:
                 title_text = rich_text[0]["text"]["content"]
-                insight_children = insight_blocks[1:]
+                insight_children = list(insight_blocks[1:])
         elif first_block["type"].startswith("heading"):
             h_type = first_block["type"]
             rich_text = first_block[h_type]["rich_text"]
             if rich_text:
                 title_text = rich_text[0]["text"]["content"]
-                insight_children = insight_blocks[1:]
+                insight_children = list(insight_blocks[1:])
             
-        blocks.append(create_callout_block(title_text, emoji="🎯", color="blue_background", children=insight_children))
+        # 在 Callout 内部末尾明确附带总结生成模型
+        insight_children.append({"object": "block", "type": "divider", "divider": {}})
+        insight_children.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": notion_client._parse_rich_text(f"🤖 **总结生成模型**: `{insight_model}`")
+            }
+        })
+
+        display_title = f"{title_text} | 模型: {insight_model}"
+        blocks.append(create_callout_block(display_title, emoji="🎯", color="blue_background", children=insight_children))
     else:
-        blocks.append(create_callout_block(global_insight, emoji="🎯", color="blue_background"))
+        fallback_children = [
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": notion_client._parse_rich_text(global_insight)}},
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": notion_client._parse_rich_text(f"🤖 **总结生成模型**: `{insight_model}`")}}
+        ]
+        blocks.append(create_callout_block(f"今日github洞察 | 模型: {insight_model}", emoji="🎯", color="blue_background", children=fallback_children))
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
 
@@ -433,7 +485,28 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
 
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
-    blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (CST)"}, "annotations": {"color": "gray"}}]}})
+    blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (CST) | 总结生成模型: {insight_model}"
+                    },
+                    "annotations": {"color": "gray"}
+                }
+            ]
+        }
+    })
+
+    # 写入 GitHub Actions 运行摘要 (Step Summary) - 仅元信息，不含敏感洞察正文
+    write_github_step_summary(
+        title=f"🚀 GitHub Daily Alpha Radar | {today_str}",
+        model_name=insight_model,
+        report_type="daily"
+    )
 
     return blocks
 

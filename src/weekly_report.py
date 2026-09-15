@@ -7,7 +7,14 @@ from .database import db_manager
 from .graph_analyzer import GraphAnalyzer
 from .crawler_zai import repo_analyzer
 from .notion_client import notion_client
-from .daily_report import sanitize_ai_summary, create_toggle_block, create_callout_block, clean_summary_for_table, get_zread_link
+from .daily_report import (
+    sanitize_ai_summary, 
+    create_toggle_block, 
+    create_callout_block, 
+    clean_summary_for_table, 
+    get_zread_link,
+    write_github_step_summary
+)
 from .llm_client import LLMClient
 from .user_analyzer import user_analyzer
 
@@ -19,6 +26,8 @@ async def analyze_all_tracks_with_llm(tracks_list):
     """
     settings = load_config()
     conf = settings.get("report_llm", {})
+    if not conf.get("api_key"): 
+        conf = settings.get("llm", {})
     if not conf.get("api_key"): 
         return "暂无深度洞察。", [{"id": str(t['id']), "name": f"赛道 #{t['id']}", "insight": "自动分析失败。"} for t in tracks_list]
 
@@ -66,13 +75,17 @@ async def analyze_all_tracks_with_llm(tracks_list):
     
     return "自动分析失败。", [{"id": str(t['id']), "name": f"赛道 #{t['id']}", "insight": "自动分析失败。"} for t in tracks_list]
 
-async def generate_weekly_comprehensive_insight(rising_stars, gems, tracks, user_bursts):
+async def generate_weekly_comprehensive_insight(rising_stars, gems, tracks, user_bursts, return_model: bool = False):
     """
     聚合全周所有核心信号，产出跨维度的深度技术与商业综述。
     """
     settings = load_config()
     conf = settings.get("report_llm", {})
-    if not conf.get("api_key"): return "暂无每周深度总结。"
+    if not conf.get("api_key"): 
+        conf = settings.get("llm", {})
+    if not conf.get("api_key"): 
+        msg = "暂无每周深度总结。"
+        return (msg, "无配置模型") if return_model else msg
 
     llm_client = LLMClient(
         api_key=conf.get("api_key"),
@@ -111,8 +124,21 @@ async def generate_weekly_comprehensive_insight(rising_stars, gems, tracks, user
         "文字要求：犀利、深刻、专业、具备商业前瞻性，总字数 1200 字左右。"
     )
 
-    insight = await llm_client.chat(system_prompt=system_prompt, user_prompt=context, temperature=0.6)
-    return insight or "每周洞察生成失败。"
+    insight, used_model = await llm_client.chat(
+        system_prompt=system_prompt, 
+        user_prompt=context, 
+        temperature=0.6,
+        return_model=True
+    )
+
+    final_insight = insight or "每周洞察生成失败。"
+    model_name = used_model or (conf.get("model_names", ["未知模型"])[0] if conf.get("model_names") else "未知模型")
+    if not insight:
+        model_name = f"{model_name} (调用失败，使用托底文本)"
+
+    if return_model:
+        return final_insight, model_name
+    return final_insight
 
 async def generate_weekly_report_blocks():
     """
@@ -171,7 +197,10 @@ async def generate_weekly_report_blocks():
 
     # 4. 生成【重头戏】：每周综合深度洞察
     logger.info("正在调用 LLM 进行全维度周度宏观综述分析...")
-    macro_report = await generate_weekly_comprehensive_insight(rising_stars, gems, tracks_for_llm, user_bursts)
+    macro_report, macro_model = await generate_weekly_comprehensive_insight(
+        rising_stars, gems, tracks_for_llm, user_bursts, return_model=True
+    )
+    logger.info(f"每周宏观综述生成完成，使用模型: {macro_model}")
     
     # 同时生成赛道名称
     _, analyzed_tracks_info = await analyze_all_tracks_with_llm(tracks_for_llm)
@@ -194,7 +223,15 @@ async def generate_weekly_report_blocks():
     
     # 渲染宏观报告
     macro_blocks = notion_client.markdown_to_blocks(macro_report)
-    blocks.append(create_callout_block("本周全球技术范式迁移深度报告", emoji="🔮", color="blue_background", children=macro_blocks))
+    macro_blocks.append({"object": "block", "type": "divider", "divider": {}})
+    macro_blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": notion_client._parse_rich_text(f"🤖 **总结生成模型**: `{macro_model}`")
+        }
+    })
+    blocks.append(create_callout_block(f"本周全球技术范式迁移深度报告 | 模型: {macro_model}", emoji="🔮", color="blue_background", children=macro_blocks))
     blocks.append({"object": "block", "type": "divider", "divider": {}})
 
     # --- 第一部分: 扫地僧项目 ---
@@ -255,7 +292,28 @@ async def generate_weekly_report_blocks():
         blocks.append(create_toggle_block(group_title, group_blocks))
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
-    blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"深度挖掘生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (CST)"}, "annotations": {"color": "gray"}}]}})
+    blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": f"深度挖掘生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (CST) | 总结生成模型: {macro_model}"
+                    },
+                    "annotations": {"color": "gray"}
+                }
+            ]
+        }
+    })
+
+    # 写入 GitHub Actions 运行摘要 (Step Summary) - 仅元信息，不含敏感洞察正文
+    write_github_step_summary(
+        title=f"💎 GitHub Weekly Strategy & Alpha | {today_str}",
+        model_name=macro_model,
+        report_type="weekly"
+    )
 
     return blocks
 
