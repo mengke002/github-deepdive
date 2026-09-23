@@ -154,7 +154,7 @@ def load_config(config_path="config.ini"):
             "api_key": get_setting("intent_llm", "api_key", "INTENT_LLM_API_KEY", "", aliases=["intent_llm"], key_aliases=["intent_api_key"]),
             "base_url": get_setting("intent_llm", "base_url", "INTENT_LLM_BASE_URL", "https://api.openai.com/v1", aliases=["intent_llm"], key_aliases=["intent_base_url"]),
             "model_names": split_tokens(get_setting("intent_llm", "model_name", "INTENT_LLM_MODEL_NAME", "gpt-4o", aliases=["intent_llm"], key_aliases=["intent_model_name"])),
-            "batch_size": to_int(get_setting("intent_llm", "batch_size", "INTENT_BATCH_SIZE", 10), 10),
+            "batch_size": to_int(get_setting("intent_llm", "batch_size", "INTENT_BATCH_SIZE", 6), 6),
         },
         "notion": {
             "token": get_setting("notion", "token", "NOTION_TOKEN", "", aliases=["notion"], key_aliases=["integration_token"]),

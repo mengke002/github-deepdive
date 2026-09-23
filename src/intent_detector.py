@@ -61,7 +61,7 @@ class IntentDetector:
     def __init__(self):
         self.settings = load_config()
         self._llm_client = None
-        self.batch_size = self.settings.get("intent_llm", {}).get("batch_size", 10)
+        self.batch_size = self.settings.get("intent_llm", {}).get("batch_size", 6)
 
     @property
     def llm_client(self):
@@ -268,8 +268,8 @@ class IntentDetector:
                 repo_contexts[name] = f"【项目全名】: {name}"
                 repo_infos[name] = {}
 
-        # 3. 分批调用 LLM（支持通过配置/环境变量灵活调整批大小，默认为 10）
-        batch_size = max(1, getattr(self, "batch_size", 10))
+        # 3. 分批调用 LLM（支持通过配置/环境变量灵活调整批大小，默认为 6）
+        batch_size = max(1, getattr(self, "batch_size", 6))
         names_list = list(repo_contexts.keys())
         
         system_prompt = (
