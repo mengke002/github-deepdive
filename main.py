@@ -22,20 +22,20 @@ def main():
     args = parser.parse_args()
     
     logger = logging.getLogger(__name__)
-    logger.info(f"Executing task: {args.task}")
+    from src.weekly_report import generate_weekly_report
 
     task_map = {
         "daily_alpha": run_daily_alpha,
         "daily_sync": run_daily_alpha,
         "weekly_deepdive": run_weekly_deep_dive,
         "weekly_graph_build": run_weekly_deep_dive,
+        "weekly_report": generate_weekly_report,
         "fetch_trending": lambda: DailyDiscovery().run(),
         "update_metrics": calculate_velocity_scores,
         "intent_analysis": run_intent_analysis,
     }
     
     if args.task == "generate_report":
-        # 默认生成每日报告，如果以后有每周报告参数可以再加
         from src.daily_report import generate_daily_report
         generate_daily_report()
     elif args.task in task_map:

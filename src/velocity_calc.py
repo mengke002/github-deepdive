@@ -203,13 +203,81 @@ def get_rising_stars(limit=10):
     从数据库中查询当前增长势头最猛的“黑马”项目。
     """
     query = f"""
-    SELECT full_name, star_velocity_24h, velocity_score, stargazers_count
+    SELECT full_name, star_velocity_24h, velocity_score, stargazers_count, latest_release_tag, issue_heat_score
     FROM repos
     WHERE star_velocity_24h > 0
     ORDER BY velocity_score DESC
     LIMIT {limit}
     """
     return db_manager.execute_query(query, db_type="source")
+
+def get_weekly_rising_stars(limit=15):
+    """
+    从数据库中查询过去 7 天综合增速最猛的周度“增长之王”。
+    综合考虑 7 天平均增量 (star_velocity_7d) 与累计体量。
+    """
+    query = f"""
+    SELECT full_name, star_velocity_7d, star_velocity_24h, velocity_score, stargazers_count, description, latest_release_tag, issue_heat_score
+    FROM repos
+    WHERE star_velocity_7d > 0
+    ORDER BY (star_velocity_7d * LOG10(stargazers_count + 10)) DESC
+    LIMIT {limit}
+    """
+    results = db_manager.execute_query(query, db_type="source")
+    if not results:
+        # 若历史快照积累不足，自动降级为当日增长黑马
+        results = get_rising_stars(limit=limit)
+    return results
+
+def get_weekly_trending_leaders(limit=10):
+    """
+    从 ranking_history 与 repos 中聚合查询过去 7 天登顶/上榜 Trending 的核心项目。
+    """
+    query = f"""
+    SELECT repo_full_name as full_name, 
+           COUNT(DISTINCT DATE(snapshot_date)) as trending_days,
+           MAX(stars_at_snapshot) as stars_at_snap
+    FROM ranking_history
+    WHERE rank_position <= 50
+      AND snapshot_date >= NOW() - INTERVAL 7 DAY
+    GROUP BY repo_full_name
+    ORDER BY trending_days DESC, stars_at_snap DESC
+    LIMIT {limit}
+    """
+    rows = db_manager.execute_query(query, db_type="insight")
+    results = []
+    if rows:
+        names = [f"'{r['full_name']}'" for r in rows if r.get('full_name')]
+        if names:
+            repo_infos = db_manager.execute_query(
+                f"SELECT full_name, description, stargazers_count, star_velocity_7d FROM repos WHERE full_name IN ({','.join(names)})",
+                db_type="source"
+            )
+            info_map = {r['full_name']: r for r in repo_infos}
+            for r in rows:
+                fn = r['full_name']
+                inf = info_map.get(fn, {})
+                results.append({
+                    "full_name": fn,
+                    "trending_days": r['trending_days'],
+                    "stargazers_count": inf.get('stargazers_count') or r.get('stars_at_snap') or 0,
+                    "star_velocity_7d": inf.get('star_velocity_7d') or 0,
+                    "description": inf.get('description') or "No description"
+                })
+    
+    # 兜底：如果 ranking_history 7 天内数据不足，取最近 7 天的 Trending 项目
+    if not results:
+        fb_query = f"""
+        SELECT full_name, description, stargazers_count, star_velocity_7d, star_velocity_24h, 1 as trending_days
+        FROM repos
+        WHERE last_trending_date >= CURRENT_DATE - INTERVAL 7 DAY
+           OR seed_source LIKE '%Trending%'
+        ORDER BY star_velocity_24h DESC, stargazers_count DESC
+        LIMIT {limit}
+        """
+        results = db_manager.execute_query(fb_query, db_type="source")
+    
+    return results
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

@@ -73,12 +73,9 @@ def run_weekly_deep_dive():
     communities = analyzer.detect_communities()
     analyzer.store_results(pr_results, communities)
     
-    # 2. 这里的 BFS 扩展逻辑可以集成 seed_expansion.py 的增强版
-    # 目前先使用已有的关系库数据进行图挖掘
-    
-    # 3. 生成每周深度报告
+    # 2. 生成每周深度报告 (直接复用已构建好的图分析器，杜绝重复建图与计算)
     from .weekly_report import generate_weekly_report
-    res = generate_weekly_report()
+    res = generate_weekly_report(analyzer=analyzer)
     
     logger.info(f"每周深度挖掘工作流完成: {res}")
     return res
