@@ -170,10 +170,10 @@ def write_github_step_summary(title: str, model_name: str, report_type: str = "d
 from .llm_client import LLMClient
 from .user_analyzer import user_analyzer
 
-async def generate_global_insight(rising_stars, hidden_gems, user_bursts, return_model: bool = False):
+async def generate_global_insight(rising_stars, hidden_gems, user_bursts, trending_repos=None, return_model: bool = False):
     """
     使用独立的 report_llm 模型列表生成每日综合洞察。
-    增加对 User 异动的关注。
+    整合 GitHub Trending、黑马增速与 User 异动。
     """
     settings = load_config()
     conf = settings.get("report_llm", {})
@@ -192,10 +192,22 @@ async def generate_global_insight(rising_stars, hidden_gems, user_bursts, return
 
     # 准备上下文
     context = "今日核心发现的项目列表：\n"
-    for r in rising_stars[:15]:
-        context += f"- [黑马] {r['full_name']}: {r.get('description', '')} (新增 Stars: {r.get('star_velocity_24h')})\n"
-    for g in hidden_gems[:10]:
-        context += f"- [潜力股] {g['full_name']}: {g.get('description', '')}\n"
+    if trending_repos:
+        context += "【今日 GitHub Trending 热门项目】：\n"
+        for t in trending_repos[:10]:
+            v_t = t.get('star_velocity_24h') or 0
+            v_str = f" (今日新增: +{v_t} stars)" if v_t > 0 else ""
+            context += f"- [Trending] {t['full_name']}: {t.get('description', '')}{v_str}\n"
+    
+    if rising_stars:
+        context += "\n【今日增长最猛黑马项目】：\n"
+        for r in rising_stars[:15]:
+            context += f"- [黑马] {r['full_name']}: {r.get('description', '')} (24h新增 Stars: {r.get('star_velocity_24h')})\n"
+            
+    if hidden_gems:
+        context += "\n【大牛背书潜力项目】：\n"
+        for g in hidden_gems[:10]:
+            context += f"- [潜力股] {g['full_name']}: {g.get('description', '')}\n"
     
     if user_bursts:
         context += "\n今日开发者异动：\n"
@@ -248,8 +260,23 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
         db_type="source"
     )
 
+    # 采集今日 Trending 仓库
+    trending_repos = db_manager.execute_query(
+        "SELECT full_name, description, stargazers_count, star_velocity_24h, latest_release_tag "
+        "FROM repos WHERE last_trending_date = CURRENT_DATE "
+        "ORDER BY star_velocity_24h DESC, stargazers_count DESC",
+        db_type="source"
+    )
+    if not trending_repos:
+        trending_repos = db_manager.execute_query(
+            "SELECT full_name, description, stargazers_count, star_velocity_24h, latest_release_tag "
+            "FROM repos WHERE seed_source LIKE '%Trending%' "
+            "ORDER BY updated_at_ts DESC, stargazers_count DESC LIMIT 15",
+            db_type="source"
+        )
+
     hot_repos = db_manager.execute_query(
-        f"SELECT full_name, description, stargazers_count, seed_source FROM repos WHERE seed_source LIKE '%Trending%' OR seed_source LIKE '%Top100%' ORDER BY stargazers_count DESC LIMIT {hot_limit}",
+        f"SELECT full_name, description, stargazers_count, seed_source FROM repos WHERE seed_source LIKE '%Top100%' ORDER BY stargazers_count DESC LIMIT {hot_limit}",
         db_type="source"
     )
 
@@ -260,20 +287,23 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
 
     # 2. 生成全局洞察 (使用独立模型)
     global_insight, insight_model = await generate_global_insight(
-        rising_stars, hidden_gems, user_bursts, return_model=True
+        rising_stars, hidden_gems, user_bursts, trending_repos=trending_repos, return_model=True
     )
     logger.info(f"每日全局洞察生成完成，使用模型: {insight_model}")
 
     gem_ids = [str(g['id']) for g in hidden_gems]
-    counts_res = db_manager.execute_query(
-        f"SELECT repo_id, COUNT(user_id) as cnt FROM repo_user_relations WHERE repo_id IN ({', '.join(gem_ids)}) GROUP BY repo_id",
-        db_type="relation"
-    )
-    repo_counts = {r['repo_id']: r['cnt'] for r in counts_res}
+    repo_counts = {}
+    if gem_ids:
+        counts_res = db_manager.execute_query(
+            f"SELECT repo_id, COUNT(user_id) as cnt FROM repo_user_relations WHERE repo_id IN ({', '.join(gem_ids)}) GROUP BY repo_id",
+            db_type="relation"
+        )
+        repo_counts = {r['repo_id']: r['cnt'] for r in counts_res}
 
     # 3. 并发调用 AI 进行解析
-    # 扩大解析范围，确保 Top 50 和 Hidden Gems 都有 AI 摘要
+    # 扩大解析范围，确保 Trending、Top 50 和 Hidden Gems 都有 AI 摘要
     repos_to_analyze = list(dict.fromkeys(
+        [r['full_name'] for r in trending_repos] +
         [r['full_name'] for r in rising_stars] + 
         [r['full_name'] for r in hot_repos] + 
         [r['full_name'] for r in hidden_gems]
@@ -333,8 +363,37 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
 
-    # --- 第一部分: Rising Stars ---
-    blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🔥 今日增长黑马 (Top 15)"}, "annotations": {"color": "orange", "bold": True}}]}})
+    # --- 第一部分: GitHub Trending 趋势榜 ---
+    if trending_repos:
+        blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🔥 今日 GitHub Trending (趋势榜)"}, "annotations": {"color": "red", "bold": True}}]}})
+        
+        trending_group_size = 5
+        for g in range(0, len(trending_repos), trending_group_size):
+            group_repos = trending_repos[g:g+trending_group_size]
+            group_title = f"📈 Trending 热门项目 #{g+1} - #{g+len(group_repos)}"
+            group_blocks = []
+            
+            for i, repo in enumerate(group_repos, g + 1):
+                fn = repo['full_name']
+                summary = sanitize_ai_summary(ai_summaries.get(fn, repo.get('description') or "暂无深度解析。"))
+                z_link = get_zread_link(fn)
+                
+                v_today = repo.get('star_velocity_24h') or 0
+                stars_total = repo.get('stargazers_count') or 0
+                star_tag = f"⭐ 累计 Stars: `{stars_total}`"
+                if v_today > 0:
+                    star_tag = f"🔥 今日新增: `+{v_today} stars` | " + star_tag
+                
+                group_blocks.append(create_callout_block(f"**{i}. {fn}**", emoji="🔥", color="red_background"))
+                group_blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": notion_client._parse_rich_text(f"[🔗 GitHub](https://github.com/{fn}) | [📖 zread.ai]({z_link})\n{star_tag}")}})
+                
+                group_blocks.append({"object": "block", "type": "quote", "quote": {"rich_text": notion_client._parse_rich_text(summary)}})
+                group_blocks.append({"object": "block", "type": "divider", "divider": {}})
+            
+            blocks.append(create_toggle_block(group_title, group_blocks))
+
+    # --- 第二部分: Rising Stars 黑马榜 ---
+    blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🚀 今日增长黑马 (Top 15)"}, "annotations": {"color": "orange", "bold": True}}]}})
 
     # 为了减少滑动长度，将 Top 15 分为 3 组，每组 5 个，放入折叠块
     for g in range(0, len(rising_stars), 5):
@@ -377,7 +436,7 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
         
         blocks.append(create_toggle_block(group_title, group_blocks))
 
-    # --- 第二部分: User Radar ---
+    # --- 第三部分: User Radar ---
     blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "👤 开发者雷达 (User Radar)"}, "annotations": {"color": "purple", "bold": True}}]}})
 
     radar_md_lines = []
@@ -403,7 +462,7 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
     else:
         blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "今日开发者动态平稳，暂无爆发性异动。"}, "annotations": {"italic": True}}]}})
 
-    # --- 第三部分: Talent Alpha ---
+    # --- 第四部分: Talent Alpha ---
     if hireable_kps:
         blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "👨‍💻 人才合作机会 (Talent Alpha)"}, "annotations": {"color": "green", "bold": True}}]}})
         talent_md = []
@@ -414,14 +473,13 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
         talent_blocks = notion_client.markdown_to_blocks("\n".join(talent_md))
         blocks.append(create_toggle_block("🌟 正在寻找机会的高影响力开发者", talent_blocks))
 
-    # --- 第四部分: Hot 50 ---
-    # ... (保持原有的 Hot 50 逻辑，它已经有分组折叠了)
-    blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🌟 今日全网热门 Top 50"}, "annotations": {"color": "blue"}}]}})
+    # --- 第五部分: 基石项目 Top 50 (原 Hot 50) ---
+    blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "🏛️ 历史顶级开源项目 Top 50 (基石榜)"}, "annotations": {"color": "blue", "bold": True}}]}})
 
     group_size = 10
     for g in range(0, len(hot_repos), group_size):
         group_repos = hot_repos[g:g+group_size]
-        group_title = f"📦 热门项目排行 #{g+1} - #{g+len(group_repos)}"
+        group_title = f"📦 基石项目排行 #{g+1} - #{g+len(group_repos)}"
         group_blocks = []
         for i, repo in enumerate(group_repos, g + 1):
             fn = repo['full_name']
@@ -445,7 +503,7 @@ async def generate_daily_report_blocks(rising_limit=15, hot_limit=50, hidden_lim
         
         blocks.append(create_toggle_block(group_title, group_blocks))
 
-    # --- 第五部分: Hidden Gems ---
+    # --- 第六部分: Hidden Gems ---
     blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "💎 开发者关联潜力股"}, "annotations": {"color": "purple"}}]}})
 
     if hidden_gems:

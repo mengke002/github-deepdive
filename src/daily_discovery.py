@@ -10,11 +10,15 @@ from .seed_collector import parse_markdown_table, get_repo_metadata
 logger = logging.getLogger(__name__)
 
 class DailyDiscovery:
+    def __init__(self):
+        self.trending_info = {}
+
     def run(self):
         """
         每日发现主入口：合并 Top100、Trending 和 Key Person 动态
         """
         logger.info("正在运行每日发现工作流...")
+        self.trending_info = {}
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -25,16 +29,17 @@ class DailyDiscovery:
             # 3. 并发处理 Key Person 相关逻辑
             kp_starred_repos = loop.run_until_complete(self.process_key_persons())
             
-            # 4. 合并去重并取前 200 个
+            # 4. 合并去重并取前 200 个 (Trending 优先在最前)
             merged_list = list(dict.fromkeys(trending_repos + top100_repos + kp_starred_repos))[:200]
             logger.info(f"合并后的发现池大小: {len(merged_list)} 个仓库。")
             
-            # 5. 存入数据库并标记来源
-            self._store_discovery_results(merged_list, trending_repos, top100_repos, kp_starred_repos)
+            # 5. 存入数据库并标记来源，同时写入今日快照
+            self._store_discovery_results(merged_list, trending_repos, top100_repos, kp_starred_repos, self.trending_info)
             
             # 6. 根据大牛背书情况更新 super_seed 状态
             self.mark_super_seeds()
             
+            return trending_repos, self.trending_info
         finally:
             loop.close()
 
@@ -137,22 +142,77 @@ class DailyDiscovery:
         return unique_stars
 
     async def fetch_trending(self, language="python"):
-        """使用 crawl4ai 稳定抓取 GitHub Trending"""
+        """抓取 GitHub Trending，支持 crawl4ai 并具备 requests+BeautifulSoup 稳健兜底"""
         url = f"https://github.com/trending/{language}?since=daily"
-        async with AsyncWebCrawler() as crawler:
-            result = await crawler.arun(url=url, bypass_cache=True)
-            if not result.success:
-                logger.error(f"Crawl4AI 抓取失败: {result.error_message}")
-                return []
-            
-            content = result.markdown
-            # 匹配 ## [ Owner / Repo ] 这种结构
+        content_html = None
+        content_md = None
+        
+        # 1. 优先尝试 crawl4ai
+        try:
+            async with AsyncWebCrawler() as crawler:
+                result = await crawler.arun(url=url, bypass_cache=True)
+                if result.success:
+                    content_md = result.markdown
+                    content_html = getattr(result, 'html', None)
+        except Exception as e:
+            logger.warning(f"Crawl4AI 抓取 Trending 异常，将使用 requests 兜底: {e}")
+
+        # 2. 如果未获取到 HTML/Markdown，使用 requests 兜底
+        if not content_html and not content_md:
+            try:
+                import requests
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=15)
+                if resp.status_code == 200:
+                    content_html = resp.text
+            except Exception as e:
+                logger.error(f"Requests 兜底抓取 Trending 失败: {e}")
+
+        clean_repos = []
+        self.trending_info = {}
+
+        # 3. 优先使用 BeautifulSoup 精确解析 HTML (获取准确仓库名与 stars today)
+        if content_html:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(content_html, 'html.parser')
+                articles = soup.find_all('article', class_='Box-row')
+                for idx, art in enumerate(articles, 1):
+                    h2 = art.find('h2')
+                    if not h2: continue
+                    fn = ''.join(h2.text.split())
+                    
+                    stars_today = 0
+                    stars_today_span = art.find('span', class_='d-inline-block float-sm-right')
+                    if stars_today_span:
+                        m = re.search(r'([\d,]+)\s+stars\s+today', stars_today_span.text, re.IGNORECASE)
+                        if m:
+                            stars_today = int(m.group(1).replace(',', ''))
+                    
+                    p_desc = art.find('p')
+                    desc = p_desc.text.strip() if p_desc else ""
+                    
+                    clean_repos.append(fn)
+                    self.trending_info[fn] = {
+                        "rank": idx,
+                        "stars_today": stars_today,
+                        "description": desc
+                    }
+            except Exception as e:
+                logger.warning(f"BeautifulSoup 解析 Trending HTML 异常: {e}")
+
+        # 4. 若 HTML 解析为空但有 Markdown，做正则兜底提取
+        if not clean_repos and content_md:
             pattern = r'##\s+\[\s*([a-zA-Z0-9\._-]+\s*/\s*[a-zA-Z0-9\._-]+)\s*\]'
-            matches = re.findall(pattern, content)
-            
+            matches = re.findall(pattern, content_md)
             clean_repos = [m.replace(" ", "") for m in matches]
-            logger.info(f"成功抓取 {len(clean_repos)} 个 Trending 仓库。")
-            return clean_repos
+            for idx, fn in enumerate(clean_repos, 1):
+                self.trending_info[fn] = {"rank": idx, "stars_today": 0, "description": ""}
+
+        logger.info(f"成功抓取 {len(clean_repos)} 个 Trending 仓库。")
+        return clean_repos
 
     def fetch_top100_latest(self):
         """获取 EvanLi 排行榜的最顶端数据"""
@@ -213,9 +273,11 @@ class DailyDiscovery:
         """
         db_manager.execute_batch(sql_rel, rel_records, db_type="relation")
 
-    def _store_discovery_results(self, all_names, trending_list, top100_list, kp_list):
-        """同步仓库元数据并标记发现来源"""
-        metadata_map = get_repo_metadata(all_names)
+    def _store_discovery_results(self, all_names, trending_list, top100_list, kp_list, trending_meta=None):
+        """同步仓库元数据并标记发现来源，同时写入今日快照"""
+        metadata_map = get_repo_metadata(all_names, force_refresh=True)
+        today_date = datetime.now().date()
+        trending_meta = trending_meta or {}
         
         records = []
         for fn, meta in metadata_map.items():
@@ -225,24 +287,68 @@ class DailyDiscovery:
             if fn in kp_list: sources.append("KeyPerson")
             source_str = "/".join(sources)
             
+            is_trending = fn in trending_list
+            trending_date = today_date if is_trending else None
+            
+            # 若今日 Trending 页面抓取到了 stars_today，赋予初始 24h 增量
+            v_today = 0
+            if fn in trending_meta:
+                v_today = trending_meta[fn].get("stars_today", 0)
+            
             records.append((
                 meta["id"], meta["full_name"], meta["description"], meta["language"],
                 meta["stargazers_count"], meta["forks_count"], meta["open_issues_count"],
-                meta["updated_at"], source_str, True
+                meta["updated_at"], source_str, True, trending_date, v_today
             ))
 
         if records:
             sql = """
-            INSERT INTO repos (id, full_name, description, language, stargazers_count, forks_count, open_issues_count, updated_at, seed_source, is_seed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO repos (id, full_name, description, language, stargazers_count, forks_count, open_issues_count, updated_at, seed_source, is_seed, last_trending_date, star_velocity_24h)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 stargazers_count=VALUES(stargazers_count),
+                forks_count=VALUES(forks_count),
+                open_issues_count=VALUES(open_issues_count),
                 description=VALUES(description),
+                updated_at=VALUES(updated_at),
                 seed_source=VALUES(seed_source),
-                is_seed=VALUES(is_seed)
+                is_seed=VALUES(is_seed),
+                last_trending_date=COALESCE(VALUES(last_trending_date), last_trending_date),
+                star_velocity_24h=IF(VALUES(star_velocity_24h) > 0, VALUES(star_velocity_24h), star_velocity_24h)
             """
             db_manager.execute_batch(sql, records, db_type="source")
-            logger.info(f"同步了 {len(records)} 条发现记录到数据库。")
+            logger.info(f"同步了 {len(records)} 条发现记录到数据库 (已刷新实时 Star 数)。")
+
+        # 核心：写入今日快照到 ranking_history，以推进增速计算的基准日期
+        self._store_daily_snapshots(metadata_map, trending_list)
+
+    def _store_daily_snapshots(self, metadata_map, trending_list):
+        """
+        向 insight 库的 ranking_history 写入今日快照。
+        确保每次每日工作流执行后，最新快照日期能够推进到今天，从而激活 24h 增量和黑马动能计算。
+        """
+        now = datetime.now().replace(microsecond=0)
+        snapshot_records = []
+        for fn, meta in metadata_map.items():
+            rank_pos = 999
+            if fn in trending_list:
+                rank_pos = trending_list.index(fn) + 1
+            
+            snapshot_records.append((
+                meta["id"], meta["full_name"], now, rank_pos,
+                meta.get("stargazers_count", 0), meta.get("forks_count", 0),
+                meta.get("open_issues_count", 0), meta.get("language")
+            ))
+            
+        if snapshot_records:
+            snap_sql = """
+            INSERT INTO ranking_history (
+                repo_id, repo_full_name, snapshot_date, rank_position,
+                stars_at_snapshot, forks_at_snapshot, open_issues_at_snapshot, language
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            db_manager.execute_batch(snap_sql, snapshot_records, db_type="insight")
+            logger.info(f"成功为 {len(snapshot_records)} 个核心项目写入了今日快照 (基准时间: {now.strftime('%Y-%m-%d %H:%M:%S')})。")
 
     def mark_super_seeds(self):
         """
@@ -278,13 +384,13 @@ class DailyDiscovery:
             logger.info("今日未发现获得 2 个以上大牛背书的项目。")
             return
 
-        # 3. 更新源库中的 super_seed 标记
+        # 3. 更新源库中的 super_seed 标记 (排除历史 Top100 知名项目，保留大牛共同背书的潜力股)
         target_repo_ids = [str(r['repo_id']) for r in results]
         sql_update = f"""
             UPDATE repos 
             SET super_seed = 1 
             WHERE id IN ({', '.join(target_repo_ids)})
-              AND is_seed = 0
+              AND (seed_source NOT LIKE '%Top100%' OR seed_source IS NULL)
         """
         db_manager.execute_query(sql_update, db_type="source")
         logger.info(f"成功将 {len(target_repo_ids)} 个仓库标记为超级潜力股。")

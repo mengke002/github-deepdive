@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 def calculate_velocity_scores():
     """
     基于 ranking_history 快照计算项目的 24 小时增速、7 天增速以及综合增长动能分数 (velocity_score)。
+    同时支持 Trending 实时增量对全新项目的保底评估。
     """
     logger.info("开始计算项目的增长动能分数...")
     
     # 1. 获取当前日期（用于相对计算）
-    # 由于可能存在历史数据回填，我们以数据库中最新的快照日期为基准
     latest_snap = db_manager.execute_query(
         "SELECT MAX(snapshot_date) as latest FROM ranking_history", 
         db_type="insight"
@@ -24,72 +24,83 @@ def calculate_velocity_scores():
         return
         
     latest_date = latest_snap[0]['latest']
-    date_24h_ago = latest_date - timedelta(days=1)
-    date_7d_ago = latest_date - timedelta(days=7)
-
     logger.info(f"以 {latest_date} 作为增速计算的基准日期。")
 
-    # 2. 获取最新、24 小时前和 7 天前的快照数据
-    # 使用兼容 TiDB 的标准窗口函数
+    # 2. 查询最新快照以及前序对比快照
+    # 弹性窗口策略：寻找在 latest_date 之前、最近（7 天内）的历史快照以应对可能的时间断层
     query = f"""
     WITH Latest AS (
         SELECT repo_id, stars_at_snapshot as stars, snapshot_date 
         FROM ranking_history 
         WHERE snapshot_date = '{latest_date}'
     ),
-    Prev24h_Ordered AS (
-        SELECT repo_id, stars_at_snapshot as stars,
+    Prev_Ordered AS (
+        SELECT repo_id, stars_at_snapshot as stars, snapshot_date,
                ROW_NUMBER() OVER(PARTITION BY repo_id ORDER BY snapshot_date DESC) as rn
         FROM ranking_history 
-        WHERE snapshot_date <= '{date_24h_ago}'
-        AND snapshot_date > '{date_24h_ago - timedelta(days=2)}'
+        WHERE snapshot_date < '{latest_date}'
+          AND snapshot_date >= '{latest_date - timedelta(days=7)}'
     ),
-    Prev24h AS (
-        SELECT repo_id, stars FROM Prev24h_Ordered WHERE rn = 1
-    ),
-    Prev7d_Ordered AS (
-        SELECT repo_id, stars_at_snapshot as stars,
-               ROW_NUMBER() OVER(PARTITION BY repo_id ORDER BY snapshot_date DESC) as rn
-        FROM ranking_history 
-        WHERE snapshot_date <= '{date_7d_ago}'
-        AND snapshot_date > '{date_7d_ago - timedelta(days=2)}'
-    ),
-    Prev7d AS (
-        SELECT repo_id, stars FROM Prev7d_Ordered WHERE rn = 1
+    PrevClosest AS (
+        SELECT repo_id, stars, snapshot_date FROM Prev_Ordered WHERE rn = 1
     )
     SELECT 
         L.repo_id,
         L.stars as current_stars,
-        COALESCE(P24.stars, L.stars) as stars_24h_ago,
-        COALESCE(P7.stars, L.stars) as stars_7d_ago
+        L.snapshot_date as snap_date,
+        P.stars as prev_stars,
+        P.snapshot_date as prev_date
     FROM Latest L
-    LEFT JOIN Prev24h P24 ON L.repo_id = P24.repo_id
-    LEFT JOIN Prev7d P7 ON L.repo_id = P7.repo_id
+    LEFT JOIN PrevClosest P ON L.repo_id = P.repo_id
     """
     
     stats = db_manager.execute_query(query, db_type="insight")
-    if not stats:
-        logger.warning("未找到足够的对比快照数据。")
-        return
-
     update_records = []
-    for row in stats:
-        repo_id = row['repo_id']
-        current_stars = row['current_stars']
-        
-        # 计算增量
-        v_24h = max(0, current_stars - row['stars_24h_ago'])
-        v_7d = max(0, (current_stars - row['stars_7d_ago']) / 7.0)
-        
-        # 动能分数公式: log(1 + 增速) * log(1 + 累计星数)
-        # 该公式能有效挖掘出正在快速增长的小型项目，同时给获得大量绝对增长的大型项目以合理权重。
-        velocity_score = math.log1p(v_24h) * math.log1p(current_stars)
-        
-        update_records.append((
-            int(v_24h), float(v_7d), float(velocity_score), repo_id
-        ))
+    
+    if stats:
+        # 查询 repos 表中已有的 star_velocity_24h (防止覆盖 Trending 页面直接解析到的当日激增数据)
+        repo_ids = [str(r['repo_id']) for r in stats]
+        existing_vel = {}
+        if repo_ids:
+            for i in range(0, len(repo_ids), 500):
+                chunk = repo_ids[i:i+500]
+                chunk_res = db_manager.execute_query(
+                    f"SELECT id, star_velocity_24h, stargazers_count FROM repos WHERE id IN ({','.join(chunk)})",
+                    db_type="source"
+                )
+                for cr in chunk_res:
+                    existing_vel[cr['id']] = cr.get('star_velocity_24h') or 0
 
-    # 3. 更新源数据库中的 repos 表
+        for row in stats:
+            repo_id = row['repo_id']
+            current_stars = row['current_stars'] or 0
+            prev_stars = row.get('prev_stars')
+            prev_date = row.get('prev_date')
+            
+            v_24h = 0
+            v_7d = 0.0
+            
+            if prev_stars is not None and prev_date is not None:
+                # 根据历史快照相距的天数归一化为 24h 增速
+                seconds_diff = (row['snap_date'] - prev_date).total_seconds()
+                days_diff = max(seconds_diff / 86400.0, 0.1)
+                delta_stars = max(0, current_stars - prev_stars)
+                v_24h = int(delta_stars / max(1.0, days_diff))
+                v_7d = float(delta_stars / max(1.0, days_diff / 7.0))
+            
+            # 若快照差值为 0（例如首次入库的 Trending 新项目），但 repos 表已有抓取到的今日增速，则予以保留
+            if v_24h == 0 and existing_vel.get(repo_id, 0) > 0:
+                v_24h = existing_vel[repo_id]
+                v_7d = float(v_24h * 7)
+            
+            # 动能分数公式: log(1 + 增速) * log(1 + 累计星数)
+            velocity_score = math.log1p(v_24h) * math.log1p(current_stars)
+            
+            update_records.append((
+                int(v_24h), float(v_7d), float(velocity_score), repo_id
+            ))
+
+    # 3. 批量更新源数据库中的 repos 表
     if update_records:
         update_sql = """
         UPDATE repos 
@@ -98,9 +109,25 @@ def calculate_velocity_scores():
             velocity_score = %s
         WHERE id = %s
         """
-        # 批量更新
         db_manager.execute_batch(update_sql, update_records, db_type="source")
         logger.info(f"成功更新了 {len(update_records)} 个仓库的增速分数。")
+
+    # 4. 保底更新：确保所有今日 Trending 且有增量的项目均已同步最新的动能分数
+    fallback_trending = db_manager.execute_query(
+        "SELECT id, stargazers_count, star_velocity_24h FROM repos WHERE (last_trending_date = CURRENT_DATE OR star_velocity_24h > 0) AND velocity_score = 0",
+        db_type="source"
+    )
+    if fallback_trending:
+        fb_updates = []
+        for tr in fallback_trending:
+            v = tr.get('star_velocity_24h') or 0
+            stars = tr.get('stargazers_count') or 0
+            if v > 0:
+                score = math.log1p(v) * math.log1p(stars)
+                fb_updates.append((float(score), tr['id']))
+        if fb_updates:
+            db_manager.execute_batch("UPDATE repos SET velocity_score = %s WHERE id = %s", fb_updates, db_type="source")
+            logger.info(f"为 {len(fb_updates)} 个当日趋势项目同步了保底动能分数。")
 
 def collect_fine_grained_signals(limit=20):
     """

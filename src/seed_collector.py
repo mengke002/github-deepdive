@@ -94,13 +94,73 @@ def process_commit(commit_info):
         logger.error(f"Error downloading {sha}: {e}")
     return None
 
-def get_repo_metadata(full_names):
+def get_repo_metadata(full_names, force_refresh=False):
     """Fetches repository IDs and basic metadata for unique repo names."""
     metadata = {}
     unique_names = list(set([n for n in full_names if n]))
     if not unique_names:
         return metadata
     
+    def fetch_one(name):
+        repo_data = github_client.get_repo(name)
+        if repo_data:
+            return name, {
+                "id": repo_data["id"],
+                "full_name": repo_data["full_name"],
+                "owner_id": repo_data.get("owner", {}).get("id", 0),
+                "owner_type": repo_data.get("owner", {}).get("type", "User"),
+                "description": repo_data.get("description"),
+                "homepage": repo_data.get("homepage"),
+                "language": repo_data.get("language"),
+                "stargazers_count": repo_data.get("stargazers_count", 0),
+                "forks_count": repo_data.get("forks_count", 0),
+                "open_issues_count": repo_data.get("open_issues_count", 0),
+                "created_at": repo_data.get("created_at"),
+                "updated_at": repo_data.get("updated_at"),
+                "pushed_at": repo_data.get("pushed_at"),
+                "license": repo_data.get("license", {}).get("spdx_id") if repo_data.get("license") else None
+            }
+        return name, None
+
+    if force_refresh:
+        logger.info(f"正在通过 GitHub API 强制刷新 {len(unique_names)} 个核心仓库的最新实时元数据...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_name = {executor.submit(fetch_one, name): name for name in unique_names}
+            for future in concurrent.futures.as_completed(future_to_name):
+                name, res = future.result()
+                if res:
+                    metadata[name] = res
+
+        missing_names = [n for n in unique_names if n not in metadata]
+        if missing_names:
+            try:
+                from .database import db_manager
+                for i in range(0, len(missing_names), 500):
+                    chunk = missing_names[i:i+500]
+                    format_strings = ','.join(['%s'] * len(chunk))
+                    sql = f"SELECT id, full_name, description, language, stargazers_count, forks_count, open_issues_count, updated_at FROM repos WHERE full_name IN ({format_strings})"
+                    rows = db_manager.execute_query(sql, chunk, db_type="source")
+                    for r in rows:
+                        metadata[r["full_name"]] = {
+                            "id": r["id"],
+                            "full_name": r["full_name"],
+                            "owner_id": 0,
+                            "owner_type": "User",
+                            "description": r.get("description"),
+                            "homepage": None,
+                            "language": r.get("language"),
+                            "stargazers_count": r.get("stargazers_count"),
+                            "forks_count": r.get("forks_count"),
+                            "open_issues_count": r.get("open_issues_count"),
+                            "created_at": None,
+                            "updated_at": str(r.get("updated_at")) if r.get("updated_at") else None,
+                            "pushed_at": None,
+                            "license": None
+                        }
+            except Exception as e:
+                logger.warning(f"Fallback DB cache query failed: {e}")
+        return metadata
+
     # 优先查数据库缓存，降低 GitHub API 调用频率
     needed_names = unique_names
     try:
@@ -140,28 +200,6 @@ def get_repo_metadata(full_names):
         return metadata
 
     logger.info(f"Fetching metadata for {len(needed_names)} unique repositories from GitHub API...")
-    
-    def fetch_one(name):
-        repo_data = github_client.get_repo(name)
-        if repo_data:
-            return name, {
-                "id": repo_data["id"],
-                "full_name": repo_data["full_name"],
-                "owner_id": repo_data.get("owner", {}).get("id", 0),
-                "owner_type": repo_data.get("owner", {}).get("type", "User"),
-                "description": repo_data.get("description"),
-                "homepage": repo_data.get("homepage"),
-                "language": repo_data.get("language"),
-                "stargazers_count": repo_data.get("stargazers_count"),
-                "forks_count": repo_data.get("forks_count"),
-                "open_issues_count": repo_data.get("open_issues_count"),
-                "created_at": repo_data.get("created_at"),
-                "updated_at": repo_data.get("updated_at"),
-                "pushed_at": repo_data.get("pushed_at"),
-                "license": repo_data.get("license", {}).get("spdx_id") if repo_data.get("license") else None
-            }
-        return name, None
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         future_to_name = {executor.submit(fetch_one, name): name for name in needed_names}
         for future in concurrent.futures.as_completed(future_to_name):

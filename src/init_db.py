@@ -48,12 +48,14 @@ def init_source_db():
             issue_heat_score DECIMAL(10,4) DEFAULT 0,
             super_seed BOOLEAN DEFAULT FALSE,
             commercial_signal BOOLEAN DEFAULT FALSE,
+            last_trending_date DATE,
             
             created_at_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at_ts DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_language (language),
             INDEX idx_stargazers (stargazers_count),
             INDEX idx_is_seed (is_seed),
+            INDEX idx_trending_date (last_trending_date),
             INDEX idx_final_score (final_score)
         );
         """)
